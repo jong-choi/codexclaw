@@ -17,6 +17,7 @@ Minimal onboarding + runtime for:
 ## Install
 
 ```bash
+git clone https://github.com/jong-choi/codexclaw.git
 cd codexclaw
 npm install
 ```
