@@ -49,7 +49,12 @@ Runtime behavior:
 - Multi-turn context is preserved per Telegram chat/session.
 - `/new`, `/clear`, `/reset`: clear saved context for the current chat.
 - `/context`: show the number of stored context messages.
-- During skill/tool execution, the bot posts live status updates and a final execution log.
+- The bot proactively posts a status message immediately after receiving a request.
+- While processing, it updates status periodically and during skill/tool calls.
+- It posts final completion/failure status, plus a skill execution log when tools were used.
+
+Optional config:
+- Set `telegram.proactiveStatus` to `false` to disable proactive status messages.
 
 ## Show config (redacted)
 

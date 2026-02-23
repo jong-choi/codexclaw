@@ -270,6 +270,7 @@ export async function runOnboard(options = {}) {
         "Press Enter on an empty line to ignore.",
         "Conversation context is persisted between turns.",
         "Use /new to reset context, /context to inspect history size.",
+        "Bot sends proactive status updates by default (set telegram.proactiveStatus=false to disable).",
         "Run: npm run telegram",
       ].join("\n"),
     );

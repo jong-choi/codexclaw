@@ -156,8 +156,6 @@ function buildSkillsPrompt({ notionEnabled }) {
     "</available_skills>",
     `For Notion operations, use tool \`${NOTION_TOOL_NAME}\` instead of guessing API payloads.`,
     `Authentication is already configured via ${NOTION_API_ENV_NAME}; never ask the user to reveal it.`,
-    "Never end with progress-only text such as 'checking now' or 'one moment'.",
-    "If you call a tool, wait for the tool result and then provide a complete final answer.",
   ].join("\n");
 }
 

@@ -19,6 +19,7 @@ function printHelp() {
       "  - onboard: OAuth + model select + telegram setup + optional Notion skill key",
       "  - telegram run: start long-polling bot",
       "  - in Telegram: /new resets context, /context shows stored context size",
+      "  - bot proactively sends status updates (disable with telegram.proactiveStatus=false)",
     ].join("\n"),
   );
 }

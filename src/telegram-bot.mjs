@@ -33,6 +33,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const MAX_STATUS_TEXT_CHARS = 3900;
+const PROACTIVE_STATUS_INTERVAL_MS = 10_000;
+const PROACTIVE_STATUS_QUIET_AFTER_TOOL_MS = 8_000;
+
 function startInlinePairingApproval(params) {
   const configPath = params?.configPath;
   if (!process.stdin || !process.stdin.isTTY) {
@@ -292,28 +296,91 @@ function resolveConversationSessionId(message) {
   return threadId ? `${base}:thread:${threadId}` : base;
 }
 
+function resolveStatusLocale(text) {
+  return /[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(trim(text)) ? "ko" : "en";
+}
+
+function truncateStatusText(value) {
+  const text = trim(value);
+  if (!text) {
+    return "";
+  }
+  if (text.length <= MAX_STATUS_TEXT_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, MAX_STATUS_TEXT_CHARS - 12)}\n...[truncated]`;
+}
+
+function formatElapsedSeconds(elapsedMs) {
+  const ms = Number(elapsedMs);
+  if (!Number.isFinite(ms) || ms < 0) {
+    return 0;
+  }
+  return Math.max(0, Math.round(ms / 1000));
+}
+
+function buildInitialStatus(locale) {
+  if (locale === "ko") {
+    return "요청 수신\n상태: 처리 시작";
+  }
+  return "Request received\nstatus: processing";
+}
+
+function buildWorkingStatus(locale, elapsedMs) {
+  const seconds = formatElapsedSeconds(elapsedMs);
+  if (locale === "ko") {
+    return `상태: 처리 중 (${seconds}s)`;
+  }
+  return `status: processing (${seconds}s)`;
+}
+
+function buildCompletedStatus(locale, elapsedMs) {
+  const seconds = formatElapsedSeconds(elapsedMs);
+  if (locale === "ko") {
+    return `상태: 완료 (${seconds}s)`;
+  }
+  return `status: completed (${seconds}s)`;
+}
+
+function buildFailedStatus(locale, elapsedMs) {
+  const seconds = formatElapsedSeconds(elapsedMs);
+  if (locale === "ko") {
+    return `상태: 실패 (${seconds}s)`;
+  }
+  return `status: failed (${seconds}s)`;
+}
+
 function formatToolTarget(event) {
   return [trim(event?.method), trim(event?.path)].filter(Boolean).join(" ");
 }
 
-function buildToolRunningStatus(event) {
+function buildToolRunningStatus(event, locale) {
   const target = formatToolTarget(event) || trim(event?.toolName) || "tool";
   if (event?.phase === "start") {
+    if (locale === "ko") {
+      return `스킬 호출 진행 중 (${event.index ?? 1}/${event.total ?? 1})\n${target}`;
+    }
     return `Skill call in progress (${event.index ?? 1}/${event.total ?? 1})\n${target}`;
   }
-  const status = event?.ok ? "ok" : "failed";
+  const status = event?.ok ? (locale === "ko" ? "성공" : "ok") : locale === "ko" ? "실패" : "failed";
   const statusCode = Number.isFinite(Number(event?.status)) ? ` (${Number(event.status)})` : "";
+  if (locale === "ko") {
+    return `스킬 호출 ${status}${statusCode}\n${target}`;
+  }
   return `Skill call ${status}${statusCode}\n${target}`;
 }
 
-function buildToolSummary(toolEvents) {
+function buildToolSummary(toolEvents, locale) {
   const events = Array.isArray(toolEvents) ? toolEvents.filter((entry) => entry && typeof entry === "object") : [];
   if (events.length === 0) {
     return "";
   }
   const success = events.filter((entry) => entry.ok).length;
   const fail = events.length - success;
-  const lines = [`Skill execution log`, `calls: ${events.length} (ok ${success}, failed ${fail})`];
+  const lines =
+    locale === "ko"
+      ? ["스킬 실행 로그", `호출: ${events.length}회 (성공 ${success}, 실패 ${fail})`]
+      : ["Skill execution log", `calls: ${events.length} (ok ${success}, failed ${fail})`];
   const listed = events.slice(0, 4);
   for (const entry of listed) {
     const target = formatToolTarget(entry) || trim(entry?.toolName) || "tool";
@@ -322,13 +389,33 @@ function buildToolSummary(toolEvents) {
       Number.isFinite(Number(entry?.durationMs)) && Number(entry.durationMs) >= 0
         ? `, ${Math.round(Number(entry.durationMs))}ms`
         : "";
-    const error = !entry?.ok && trim(entry?.error) ? `, error: ${trim(entry.error)}` : "";
-    lines.push(`- ${target}: ${entry?.ok ? "ok" : "failed"}${statusCode}${duration}${error}`);
+    const error =
+      !entry?.ok && trim(entry?.error)
+        ? locale === "ko"
+          ? `, 오류: ${trim(entry.error)}`
+          : `, error: ${trim(entry.error)}`
+        : "";
+    lines.push(
+      `- ${target}: ${
+        entry?.ok ? (locale === "ko" ? "성공" : "ok") : locale === "ko" ? "실패" : "failed"
+      }${statusCode}${duration}${error}`,
+    );
   }
   if (events.length > listed.length) {
-    lines.push(`- ... and ${events.length - listed.length} more`);
+    lines.push(
+      locale === "ko"
+        ? `- ... 외 ${events.length - listed.length}건`
+        : `- ... and ${events.length - listed.length} more`,
+    );
   }
   return lines.join("\n");
+}
+
+function resolveProactiveStatusEnabled(config) {
+  if (typeof config?.telegram?.proactiveStatus === "boolean") {
+    return config.telegram.proactiveStatus;
+  }
+  return true;
 }
 
 export async function runTelegramBot(options = {}) {
@@ -363,6 +450,7 @@ export async function runTelegramBot(options = {}) {
   }
   let offset = Number(config?.telegram?.offset ?? 0);
   const codexInstructions = trim(config?.codex?.instructions);
+  const proactiveStatusEnabled = resolveProactiveStatusEnabled(config);
   const conversationState = await loadConversationStore(configPath);
   let conversationStore = conversationState.store;
   let triedWebhookReset = false;
@@ -370,6 +458,7 @@ export async function runTelegramBot(options = {}) {
   process.stdout.write(`CodexClaw Telegram bot is running.\n`);
   process.stdout.write(`Model: openai-codex/${modelId}\n`);
   process.stdout.write(`DM policy: ${dmPolicy}\n`);
+  process.stdout.write(`Proactive status: ${proactiveStatusEnabled ? "on" : "off"}\n`);
   process.stdout.write(`Conversation store: ${conversationState.path}\n`);
   if (dmPolicy === "pairing") {
     process.stdout.write("Unknown DM senders will receive a pairing code.\n");
@@ -474,10 +563,13 @@ export async function runTelegramBot(options = {}) {
 
         await sendTyping(botToken, chatId);
         const stopTypingHeartbeat = startTypingHeartbeat(botToken, chatId);
+        const requestStartedAt = Date.now();
+        const locale = resolveStatusLocale(text);
         let statusMessageId = null;
         const seenToolEvents = [];
+        let lastToolStatusAt = 0;
         const upsertStatus = async (statusText) => {
-          const next = trim(statusText);
+          const next = truncateStatusText(statusText);
           if (!next) {
             return;
           }
@@ -495,6 +587,21 @@ export async function runTelegramBot(options = {}) {
             statusMessageId = null;
           }
         };
+        let stopProactivePulse = () => {};
+        if (proactiveStatusEnabled) {
+          await upsertStatus(buildInitialStatus(locale));
+          const pulse = setInterval(() => {
+            const quietSinceTool = Date.now() - lastToolStatusAt;
+            if (lastToolStatusAt > 0 && quietSinceTool < PROACTIVE_STATUS_QUIET_AFTER_TOOL_MS) {
+              return;
+            }
+            void upsertStatus(buildWorkingStatus(locale, Date.now() - requestStartedAt));
+          }, PROACTIVE_STATUS_INTERVAL_MS);
+          if (typeof pulse.unref === "function") {
+            pulse.unref();
+          }
+          stopProactivePulse = () => clearInterval(pulse);
+        }
 
         try {
           const fresh = await resolveFreshCodexAccessToken(oauth);
@@ -529,7 +636,8 @@ export async function runTelegramBot(options = {}) {
             skills: config?.skills,
             onToolEvent: async (event) => {
               if (event?.phase === "start" || event?.phase === "result") {
-                await upsertStatus(buildToolRunningStatus(event));
+                lastToolStatusAt = Date.now();
+                await upsertStatus(buildToolRunningStatus(event, locale));
               }
               if (event?.phase === "result") {
                 seenToolEvents.push(event);
@@ -550,14 +658,24 @@ export async function runTelegramBot(options = {}) {
             Array.isArray(response?.toolEvents) && response.toolEvents.length > 0
               ? response.toolEvents
               : seenToolEvents;
-          const toolSummary = buildToolSummary(toolEvents);
-          if (toolSummary) {
+          const toolSummary = buildToolSummary(toolEvents, locale);
+          const doneLine = buildCompletedStatus(locale, Date.now() - requestStartedAt);
+          if (toolSummary && proactiveStatusEnabled) {
+            await upsertStatus(`${toolSummary}\n${doneLine}`);
+          } else if (toolSummary) {
             await upsertStatus(toolSummary);
+          } else if (proactiveStatusEnabled) {
+            await upsertStatus(doneLine);
           }
         } catch (error) {
-          const toolSummary = buildToolSummary(seenToolEvents);
-          if (toolSummary) {
-            await upsertStatus(`${toolSummary}\nrequest status: failed`);
+          const toolSummary = buildToolSummary(seenToolEvents, locale);
+          const failedLine = buildFailedStatus(locale, Date.now() - requestStartedAt);
+          if (toolSummary && proactiveStatusEnabled) {
+            await upsertStatus(`${toolSummary}\n${failedLine}`);
+          } else if (toolSummary) {
+            await upsertStatus(`${toolSummary}\n${failedLine}`);
+          } else if (proactiveStatusEnabled) {
+            await upsertStatus(failedLine);
           }
           await sendMessage(
             botToken,
@@ -566,6 +684,7 @@ export async function runTelegramBot(options = {}) {
           );
         } finally {
           stopTypingHeartbeat();
+          stopProactivePulse();
         }
       }
 
