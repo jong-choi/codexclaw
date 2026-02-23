@@ -199,10 +199,10 @@ Runtime behavior:
 - `/help` (or `/commands`): show command list and usage examples.
 - `/new`, `/clear`, `/reset`: clear saved context for the current chat.
 - `/context`: show the number of stored context messages.
-- `/usage`: show Codex usage totals (requests/tokens/cost) and per-chat usage.
+- `/usage`: show live Codex usage limit windows (for example, 5h and 1w).
 - `/think`, `/thinking`, `/reasoning`: show or set reasoning effort (`none|minimal|low|medium|high|xhigh`).
 - `/models`: list available Codex models.
-- `/model`: show current model + current reasoning effort + usage summary. `/model <id|number>` switches model immediately.
+- `/model`: show current model + current reasoning effort + usage limit summary. `/model <id|number>` switches model immediately.
 - Invalid command or wrong arguments: bot replies with the correct usage and points to `/help`.
 - Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
 - Telegram command menu (`/`) is synced automatically on startup.

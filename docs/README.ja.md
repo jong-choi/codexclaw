@@ -197,10 +197,10 @@ npm run telegram
 - `/help` (`/commands`も可): コマンド一覧と使用例を表示
 - `/new`, `/clear`, `/reset`: 現在チャットの文脈をクリア
 - `/context`: 保存済み文脈メッセージ数を表示
-- `/usage`: Codex 使用量(リクエスト/トークン/コスト)の全体/チャット別統計を表示
+- `/usage`: Codex のリアルタイム利用枠ウィンドウ(例: 5h, 1w)を表示
 - `/think`, `/thinking`, `/reasoning`: Reasoning effort を表示/変更(`none|minimal|low|medium|high|xhigh`)
 - `/models`: 利用可能な Codex モデル一覧を表示
-- `/model`: 現在モデル + reasoning effort + 使用量サマリーを表示し、`/model <id|番号>`で即時切替
+- `/model`: 現在モデル + reasoning effort + 利用枠サマリーを表示し、`/model <id|番号>`で即時切替
 - 不正なコマンド/引数: 正しい使い方と `/help` を案内
 - ターミナルで `bye` または `exit` 入力: `telegram run` を即停止(`\`/bye\``, `\`/exit\``も可)
 - Telegram コマンドメニュー(`/`)は起動時に自動同期されます。

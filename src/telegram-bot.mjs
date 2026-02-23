@@ -47,7 +47,8 @@ function sleep(ms) {
 const MAX_STATUS_TEXT_CHARS = 3900;
 const PROACTIVE_STATUS_INTERVAL_MS = 10_000;
 const PROACTIVE_STATUS_QUIET_AFTER_TOOL_MS = 8_000;
-const TELEGRAM_USAGE_VERSION = 1;
+const CODEX_USAGE_API_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_USAGE_TIMEOUT_MS = 6_000;
 const REASONING_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
 const TELEGRAM_BOT_COMMANDS = [
@@ -55,7 +56,7 @@ const TELEGRAM_BOT_COMMANDS = [
   { command: "help", description: "Show available commands" },
   { command: "new", description: "Reset context for this chat" },
   { command: "context", description: "Show stored context message count" },
-  { command: "usage", description: "Show Codex usage (requests/tokens/cost)" },
+  { command: "usage", description: "Show Codex usage limits (5h/week)" },
   { command: "think", description: "Show or set reasoning effort" },
   { command: "models", description: "List available Codex models" },
   { command: "model", description: "Show or switch model (/model <id|number>)" },
@@ -345,178 +346,256 @@ function resolveReasoningEffort(config) {
   return "none";
 }
 
-function asFiniteNumber(value) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+function parseFiniteNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function clampPercent(value) {
+  const parsed = parseFiniteNumber(value);
+  if (!Number.isFinite(parsed)) {
     return 0;
+  }
+  if (parsed < 0) {
+    return 0;
+  }
+  if (parsed > 100) {
+    return 100;
   }
   return parsed;
 }
 
-function formatInteger(value) {
-  return Math.round(asFiniteNumber(value)).toLocaleString("en-US");
-}
-
-function formatUsd(value) {
-  return asFiniteNumber(value).toFixed(6);
-}
-
-function createEmptyUsageBucket() {
-  return {
-    requests: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    totalTokens: 0,
-    costInput: 0,
-    costOutput: 0,
-    costCacheRead: 0,
-    costCacheWrite: 0,
-    costTotal: 0,
-    updatedAt: "",
-  };
-}
-
-function normalizeUsageBucket(raw) {
-  const bucket = raw && typeof raw === "object" ? raw : {};
-  return {
-    requests: Math.max(0, Math.floor(asFiniteNumber(bucket.requests))),
-    inputTokens: asFiniteNumber(bucket.inputTokens),
-    outputTokens: asFiniteNumber(bucket.outputTokens),
-    cacheReadTokens: asFiniteNumber(bucket.cacheReadTokens),
-    cacheWriteTokens: asFiniteNumber(bucket.cacheWriteTokens),
-    totalTokens: asFiniteNumber(bucket.totalTokens),
-    costInput: asFiniteNumber(bucket.costInput),
-    costOutput: asFiniteNumber(bucket.costOutput),
-    costCacheRead: asFiniteNumber(bucket.costCacheRead),
-    costCacheWrite: asFiniteNumber(bucket.costCacheWrite),
-    costTotal: asFiniteNumber(bucket.costTotal),
-    updatedAt: trim(bucket.updatedAt),
-  };
-}
-
-function normalizeUsageState(raw) {
-  const usage = raw && typeof raw === "object" ? raw : {};
-  const chatsRaw = usage.chats && typeof usage.chats === "object" ? usage.chats : {};
-  const chats = {};
-  for (const [key, value] of Object.entries(chatsRaw)) {
-    const chatId = trim(key);
-    if (!chatId) {
-      continue;
-    }
-    chats[chatId] = normalizeUsageBucket(value);
+function resolveCodexAccountId(oauth) {
+  if (!oauth || typeof oauth !== "object") {
+    return "";
   }
-  return {
-    version: TELEGRAM_USAGE_VERSION,
-    total: normalizeUsageBucket(usage.total),
-    chats,
-  };
-}
-
-function normalizeUsageSnapshot(rawUsage) {
-  const usage = rawUsage && typeof rawUsage === "object" ? rawUsage : {};
-  const cost = usage.cost && typeof usage.cost === "object" ? usage.cost : {};
-  const inputTokens = asFiniteNumber(usage.input);
-  const outputTokens = asFiniteNumber(usage.output);
-  const cacheReadTokens = asFiniteNumber(usage.cacheRead);
-  const cacheWriteTokens = asFiniteNumber(usage.cacheWrite);
-  const derivedTotal = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    totalTokens: asFiniteNumber(usage.totalTokens) || derivedTotal,
-    costInput: asFiniteNumber(cost.input),
-    costOutput: asFiniteNumber(cost.output),
-    costCacheRead: asFiniteNumber(cost.cacheRead),
-    costCacheWrite: asFiniteNumber(cost.cacheWrite),
-    costTotal: asFiniteNumber(cost.total),
-  };
-}
-
-function applyUsageToBucket(bucket, snapshot, nowIso) {
-  const current = normalizeUsageBucket(bucket);
-  return {
-    requests: current.requests + 1,
-    inputTokens: current.inputTokens + snapshot.inputTokens,
-    outputTokens: current.outputTokens + snapshot.outputTokens,
-    cacheReadTokens: current.cacheReadTokens + snapshot.cacheReadTokens,
-    cacheWriteTokens: current.cacheWriteTokens + snapshot.cacheWriteTokens,
-    totalTokens: current.totalTokens + snapshot.totalTokens,
-    costInput: current.costInput + snapshot.costInput,
-    costOutput: current.costOutput + snapshot.costOutput,
-    costCacheRead: current.costCacheRead + snapshot.costCacheRead,
-    costCacheWrite: current.costCacheWrite + snapshot.costCacheWrite,
-    costTotal: current.costTotal + snapshot.costTotal,
-    updatedAt: nowIso,
-  };
-}
-
-function applyUsageSnapshotToConfig(config, chatId, rawUsage) {
-  if (!config || typeof config !== "object") {
-    return;
-  }
-  const normalizedChatId = trim(chatId);
-  if (!normalizedChatId) {
-    return;
-  }
-  const snapshot = normalizeUsageSnapshot(rawUsage);
-  const nowIso = new Date().toISOString();
-  const usageState = normalizeUsageState(config?.telegram?.usage);
-  usageState.total = applyUsageToBucket(usageState.total, snapshot, nowIso);
-  usageState.chats[normalizedChatId] = applyUsageToBucket(
-    usageState.chats[normalizedChatId],
-    snapshot,
-    nowIso,
-  );
-  config.telegram = {
-    ...(config.telegram ?? {}),
-    usage: usageState,
-  };
-}
-
-function buildUsageSummaryLines(total, chat) {
-  return [
-    "Total:",
-    `- requests: ${formatInteger(total.requests)}`,
-    `- tokens: ${formatInteger(total.totalTokens)} (in ${formatInteger(total.inputTokens)}, out ${formatInteger(total.outputTokens)}, cache read ${formatInteger(total.cacheReadTokens)}, cache write ${formatInteger(total.cacheWriteTokens)})`,
-    `- cost: $${formatUsd(total.costTotal)} (in $${formatUsd(total.costInput)}, out $${formatUsd(total.costOutput)}, cache read $${formatUsd(total.costCacheRead)}, cache write $${formatUsd(total.costCacheWrite)})`,
-    "",
-    "This chat:",
-    `- requests: ${formatInteger(chat.requests)}`,
-    `- tokens: ${formatInteger(chat.totalTokens)} (in ${formatInteger(chat.inputTokens)}, out ${formatInteger(chat.outputTokens)}, cache read ${formatInteger(chat.cacheReadTokens)}, cache write ${formatInteger(chat.cacheWriteTokens)})`,
-    `- cost: $${formatUsd(chat.costTotal)} (in $${formatUsd(chat.costInput)}, out $${formatUsd(chat.costOutput)}, cache read $${formatUsd(chat.costCacheRead)}, cache write $${formatUsd(chat.costCacheWrite)})`,
+  const candidates = [
+    oauth.accountId,
+    oauth.account_id,
+    oauth.chatgptAccountId,
+    oauth.chatgpt_account_id,
   ];
-}
-
-function buildUsageReport(config, chatId) {
-  const usageState = normalizeUsageState(config?.telegram?.usage);
-  const total = usageState.total;
-  const chat = normalizeUsageBucket(usageState.chats?.[trim(chatId)]);
-  const lines = ["Codex usage", "", ...buildUsageSummaryLines(total, chat)];
-  if (trim(total.updatedAt)) {
-    lines.push("", `Last updated: ${trim(total.updatedAt)}`);
+  for (const candidate of candidates) {
+    const value = trim(candidate);
+    if (value) {
+      return value;
+    }
   }
-  return lines.join("\n");
+  return "";
 }
 
-function buildModelStatusMessage(config, chatId, modelId) {
-  const usageState = normalizeUsageState(config?.telegram?.usage);
-  const total = usageState.total;
-  const chat = normalizeUsageBucket(usageState.chats?.[trim(chatId)]);
+function toResetAtMs(value) {
+  const parsed = parseFiniteNumber(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  if (parsed > 1_000_000_000_000) {
+    return Math.round(parsed);
+  }
+  return Math.round(parsed * 1000);
+}
+
+function formatWindowLabel(limitWindowSeconds, fallbackLabel) {
+  const seconds = parseFiniteNumber(limitWindowSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return fallbackLabel;
+  }
+  const rounded = Math.round(seconds);
+  if (rounded % 604800 === 0) {
+    const weeks = Math.max(1, Math.round(rounded / 604800));
+    return `${weeks}w`;
+  }
+  if (rounded % 86400 === 0) {
+    const days = Math.max(1, Math.round(rounded / 86400));
+    return `${days}d`;
+  }
+  if (rounded % 3600 === 0) {
+    const hours = Math.max(1, Math.round(rounded / 3600));
+    return `${hours}h`;
+  }
+  return `${Math.max(1, Math.round(rounded / 3600))}h`;
+}
+
+function formatResetRemaining(targetMs, now = Date.now()) {
+  if (!Number.isFinite(targetMs) || targetMs <= 0) {
+    return "";
+  }
+  const diffMs = targetMs - now;
+  if (diffMs <= 0) {
+    return "now";
+  }
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 1) {
+    return "<1m";
+  }
+  if (diffMins < 60) {
+    return `${diffMins}m`;
+  }
+  const hours = Math.floor(diffMins / 60);
+  const mins = diffMins % 60;
+  if (hours < 24) {
+    return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    return `${days}d ${hours % 24}h`;
+  }
+  return new Date(targetMs).toISOString();
+}
+
+function normalizeCodexUsageSnapshot(rawPayload) {
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const rateLimit = payload.rate_limit && typeof payload.rate_limit === "object" ? payload.rate_limit : {};
+  const primary = rateLimit.primary_window && typeof rateLimit.primary_window === "object" ? rateLimit.primary_window : null;
+  const secondary =
+    rateLimit.secondary_window && typeof rateLimit.secondary_window === "object"
+      ? rateLimit.secondary_window
+      : null;
+
+  const windows = [];
+  if (primary) {
+    const usedPercent = clampPercent(primary.used_percent);
+    windows.push({
+      label: formatWindowLabel(primary.limit_window_seconds ?? 18_000, "5h"),
+      usedPercent,
+      remainingPercent: clampPercent(100 - usedPercent),
+      resetAt: toResetAtMs(primary.reset_at),
+    });
+  }
+  if (secondary) {
+    const usedPercent = clampPercent(secondary.used_percent);
+    windows.push({
+      label: formatWindowLabel(secondary.limit_window_seconds ?? 604_800, "1w"),
+      usedPercent,
+      remainingPercent: clampPercent(100 - usedPercent),
+      resetAt: toResetAtMs(secondary.reset_at),
+    });
+  }
+
+  let plan = trim(payload.plan_type);
+  const credits = payload.credits && typeof payload.credits === "object" ? payload.credits : null;
+  const balance = parseFiniteNumber(credits?.balance);
+  if (Number.isFinite(balance)) {
+    const formatted = `$${Number(balance).toFixed(2)}`;
+    plan = plan ? `${plan} (${formatted})` : formatted;
+  }
+
+  return { plan, windows };
+}
+
+async function fetchCodexUsageSnapshot(params) {
+  const accessToken = trim(params?.accessToken);
+  if (!accessToken) {
+    throw new Error("Missing Codex access token.");
+  }
+
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: "application/json",
+    "User-Agent": "CodexClaw",
+  };
+  const accountId = resolveCodexAccountId(params?.oauthCredentials);
+  if (accountId) {
+    headers["ChatGPT-Account-Id"] = accountId;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CODEX_USAGE_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(CODEX_USAGE_API_URL, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  let payload = null;
+  let rawText = "";
+  try {
+    rawText = await response.text();
+    payload = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const description = trim(payload?.description) || trim(payload?.error) || trim(rawText);
+    throw new Error(
+      `Codex usage API error (${response.status})${description ? `: ${description}` : ""}`,
+    );
+  }
+
+  return normalizeCodexUsageSnapshot(payload);
+}
+
+function formatCodexUsageLines(snapshot, now = Date.now()) {
+  const lines = ["Codex usage limits"];
+  if (trim(snapshot?.plan)) {
+    lines.push(`Plan: ${trim(snapshot.plan)}`);
+  }
+  lines.push("");
+  const windows = Array.isArray(snapshot?.windows) ? snapshot.windows : [];
+  if (windows.length === 0) {
+    lines.push("- no window data returned by Codex API.");
+    return lines;
+  }
+  for (const window of windows) {
+    const reset = formatResetRemaining(window?.resetAt, now);
+    const resetSuffix = reset ? ` · resets in ${reset}` : "";
+    lines.push(
+      `- ${trim(window?.label) || "window"}: ${Math.round(clampPercent(window?.remainingPercent))}% left${resetSuffix}`,
+    );
+  }
+  return lines;
+}
+
+function buildUsageReport(snapshot) {
+  return formatCodexUsageLines(snapshot).join("\n");
+}
+
+function buildModelStatusMessage(config, modelId, usageLines) {
+  const lines = Array.isArray(usageLines) && usageLines.length > 0 ? usageLines : ["Codex usage limits", "- unavailable"];
   const reasoningEffort = resolveReasoningEffort(config);
   return [
     `Current model: ${resolveModelRef(modelId)}`,
     `Reasoning effort: ${reasoningEffort}`,
     "",
-    "Usage summary:",
-    ...buildUsageSummaryLines(total, chat),
+    ...lines,
     "",
     "Change model with /model <id|number>.",
     "Change reasoning with /think <none|minimal|low|medium|high|xhigh>.",
   ].join("\n");
+}
+
+async function resolveFreshCodexSessionAccess(params) {
+  const fresh = await resolveFreshCodexAccessToken(params?.oauth);
+  const oauth = fresh.credentials;
+  if (fresh.changed) {
+    params.config.codex = {
+      ...params.config.codex,
+      oauth,
+    };
+    params.config.telegram = {
+      ...params.config.telegram,
+      offset: params.offset,
+    };
+    await saveConfig(params.config, params.configPath);
+  }
+  return {
+    accessToken: fresh.accessToken,
+    oauth,
+  };
 }
 
 function buildModelListMessage(currentModelId) {
@@ -614,10 +693,10 @@ function buildHelpMessage() {
     "/help - Show this command guide.",
     "/new (/clear, /reset) - Reset context for this chat.",
     "/context - Show stored context message count.",
-    "/usage - Show Codex usage (requests/tokens/cost).",
+    "/usage - Show live Codex usage limits (5h/week).",
     "/think <level> - Set reasoning effort.",
     "/models - List available models.",
-    "/model - Show current model + reasoning + usage summary.",
+    "/model - Show current model + reasoning + usage limit summary.",
     "/model <id|number> - Switch model immediately.",
     "",
     `Reasoning levels: ${REASONING_EFFORT_LEVELS.join(", ")}`,
@@ -876,12 +955,6 @@ async function runDueScheduledJobs(params) {
       });
 
       await sendMessage(params?.botToken, chatId, response.text);
-      if (typeof params?.onUsage === "function") {
-        params.onUsage({
-          chatId,
-          usage: response?.usage,
-        });
-      }
       conversationStore = appendConversationTurn({
         store: conversationStore,
         sessionId,
@@ -993,9 +1066,6 @@ export async function runTelegramBot(options = {}) {
         configPath,
         oauth,
         conversationStore,
-        onUsage: ({ chatId, usage }) => {
-          applyUsageSnapshotToConfig(config, chatId, usage);
-        },
       });
       oauth = scheduledRun.oauth;
       conversationStore = scheduledRun.conversationStore;
@@ -1091,7 +1161,7 @@ export async function runTelegramBot(options = {}) {
               "Use /help to see all available commands.",
               "Use /new to reset context for this chat.",
               "Use /context to inspect stored context size.",
-              "Use /usage to inspect Codex usage.",
+              "Use /usage to inspect Codex 5h/week usage limits.",
               "Use /think to inspect or set reasoning effort.",
               "Use /models to list models, /model to inspect current model.",
             ].join("\n"),
@@ -1148,7 +1218,26 @@ export async function runTelegramBot(options = {}) {
             );
             continue;
           }
-          await sendMessage(botToken, chatId, buildUsageReport(config, chatId));
+          try {
+            const fresh = await resolveFreshCodexSessionAccess({
+              oauth,
+              config,
+              configPath,
+              offset,
+            });
+            oauth = fresh.oauth;
+            const snapshot = await fetchCodexUsageSnapshot({
+              accessToken: fresh.accessToken,
+              oauthCredentials: oauth,
+            });
+            await sendMessage(botToken, chatId, buildUsageReport(snapshot));
+          } catch (error) {
+            await sendMessage(
+              botToken,
+              chatId,
+              `Codex usage lookup failed: ${trim(error?.message) || "unknown error"}`,
+            );
+          }
           continue;
         }
 
@@ -1208,7 +1297,28 @@ export async function runTelegramBot(options = {}) {
         if (command === "/model") {
           const arg = resolveCommandArgs(text);
           if (!arg) {
-            await sendMessage(botToken, chatId, buildModelStatusMessage(config, chatId, activeModelId));
+            let usageLines = ["Codex usage limits", "", "- unavailable"];
+            try {
+              const fresh = await resolveFreshCodexSessionAccess({
+                oauth,
+                config,
+                configPath,
+                offset,
+              });
+              oauth = fresh.oauth;
+              const snapshot = await fetchCodexUsageSnapshot({
+                accessToken: fresh.accessToken,
+                oauthCredentials: oauth,
+              });
+              usageLines = formatCodexUsageLines(snapshot);
+            } catch (error) {
+              usageLines = [
+                "Codex usage limits",
+                "",
+                `- unavailable (${trim(error?.message) || "unknown error"})`,
+              ];
+            }
+            await sendMessage(botToken, chatId, buildModelStatusMessage(config, activeModelId, usageLines));
             continue;
           }
           const selectedModelId = resolveModelSelection(arg);
@@ -1358,7 +1468,6 @@ export async function runTelegramBot(options = {}) {
 
           stopTypingNow();
           await sendMessage(botToken, chatId, response.text);
-          applyUsageSnapshotToConfig(config, chatId, response?.usage);
           conversationStore = appendConversationTurn({
             store: conversationStore,
             sessionId,
