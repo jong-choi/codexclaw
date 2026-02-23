@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Minimal Codex + Telegram onboarding CLI",
   "type": "module",
+  "license": "MIT",
   "bin": {
     "codexclaw": "./bin/codexclaw.mjs",
     "tele-codex": "./bin/codexclaw.mjs"
