@@ -17,6 +17,33 @@ OpenClaw는 MIT 라이선스([openclaw/openclaw](https://github.com/openclaw/ope
 6. 선택: 스케줄러 도구(`schedule_create`, `schedule_list`, `schedule_delete`) 설정
 7. 워크스페이스 파일 스킬(`workspace_files`)로 메모리/지시 파일 관리
 
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="images/telegram-chat-01.jpeg">
+        <img src="images/telegram-chat-01.jpeg" width="260" alt="Telegram chat 01" />
+      </a>
+    </td>
+    <td align="center" width="50%">
+      <a href="images/telegram-chat-02.jpeg">
+        <img src="images/telegram-chat-02.jpeg" width="260" alt="Telegram chat 02" />
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="images/telegram-chat-03.jpeg">
+        <img src="images/telegram-chat-03.jpeg" width="260" alt="Telegram chat 03" />
+      </a>
+    </td>
+    <td align="center" width="50%">
+      <a href="images/telegram-chat-04.jpeg">
+        <img src="images/telegram-chat-04.jpeg" width="260" alt="Telegram chat 04" />
+      </a>
+    </td>
+  </tr>
+</table>
+
 ## 설치
 
 ```bash

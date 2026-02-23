@@ -2,6 +2,8 @@
 
 [English](README.md) | [한국어](docs/README.ko.md) | [日本語](docs/README.ja.md)
 
+
+
 Most of this code was written with GPT-5.3-Codex-xhigh, so you can keep editing and iterating with Codex too. 
 This project is focused on Codex + Telegram integration. 
 This project was created by extracting only the parts I needed from the much larger OpenClaw project. 
@@ -16,6 +18,33 @@ Minimal onboarding + runtime for:
 5. Optional web tools (`web_search`, `web_fetch`) setup
 6. Optional scheduler tools (`schedule_create`, `schedule_list`, `schedule_delete`) setup
 7. Workspace file skill (`workspace_files`) for memory/instruction file management
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/images/telegram-chat-01.jpeg">
+        <img src="docs/images/telegram-chat-01.jpeg" width="260" alt="Telegram chat 01" />
+      </a>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/images/telegram-chat-02.jpeg">
+        <img src="docs/images/telegram-chat-02.jpeg" width="260" alt="Telegram chat 02" />
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/images/telegram-chat-03.jpeg">
+        <img src="docs/images/telegram-chat-03.jpeg" width="260" alt="Telegram chat 03" />
+      </a>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/images/telegram-chat-04.jpeg">
+        <img src="docs/images/telegram-chat-04.jpeg" width="260" alt="Telegram chat 04" />
+      </a>
+    </td>
+  </tr>
+</table>
 
 ## Install
 

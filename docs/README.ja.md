@@ -17,6 +17,33 @@ OpenClaw は MIT ライセンス([openclaw/openclaw](https://github.com/openclaw
 6. 任意: スケジューラーツール(`schedule_create`, `schedule_list`, `schedule_delete`)設定
 7. ワークスペースファイルスキル(`workspace_files`)によるメモリ/指示ファイル管理
 
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="images/telegram-chat-01.jpeg">
+        <img src="images/telegram-chat-01.jpeg" width="260" alt="Telegram chat 01" />
+      </a>
+    </td>
+    <td align="center" width="50%">
+      <a href="images/telegram-chat-02.jpeg">
+        <img src="images/telegram-chat-02.jpeg" width="260" alt="Telegram chat 02" />
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="images/telegram-chat-03.jpeg">
+        <img src="images/telegram-chat-03.jpeg" width="260" alt="Telegram chat 03" />
+      </a>
+    </td>
+    <td align="center" width="50%">
+      <a href="images/telegram-chat-04.jpeg">
+        <img src="images/telegram-chat-04.jpeg" width="260" alt="Telegram chat 04" />
+      </a>
+    </td>
+  </tr>
+</table>
+
 ## インストール
 
 ```bash
