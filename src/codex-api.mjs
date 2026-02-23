@@ -11,8 +11,8 @@ import {
   NOTION_API_ENV_NAME,
   NOTION_API_VERSION,
   NOTION_SKILL_KEY,
-  SCHEDULER_DEFAULT_TIMEZONE,
   SCHEDULER_SKILL_KEY,
+  TIME_CONTEXT_SKILL_KEY,
   WORKSPACE_FILES_SKILL_KEY,
   WORKSPACE_INSTRUCTIONS_FILE_NAME,
   WORKSPACE_MEMORY_FILE_NAME,
@@ -22,9 +22,12 @@ import {
 import {
   cancelScheduledJob,
   createScheduledJob,
+  formatDateTimeInTimezone,
+  isValidSchedulerTimezone,
   listScheduledJobs,
   resolveSchedulerTimezone,
 } from "./schedule-store.mjs";
+import { getTelegramChatTimezone, setTelegramChatTimezone } from "./telegram-settings-store.mjs";
 import { ensureWorkspaceInitialized, resolveWorkspaceRoot } from "./workspace.mjs";
 
 const DEFAULT_CODEX_INSTRUCTIONS =
@@ -43,6 +46,9 @@ const WORKSPACE_DELETE_TOOL_NAME = "workspace_delete_path";
 const SCHEDULE_CREATE_TOOL_NAME = "schedule_create";
 const SCHEDULE_LIST_TOOL_NAME = "schedule_list";
 const SCHEDULE_DELETE_TOOL_NAME = "schedule_delete";
+const TIMEZONE_GET_TOOL_NAME = "timezone_get";
+const TIMEZONE_SET_TOOL_NAME = "timezone_set";
+const CURRENT_TIME_GET_TOOL_NAME = "current_time_get";
 
 const WEB_SEARCH_DEFAULT_COUNT = 5;
 const WEB_SEARCH_MAX_COUNT = 10;
@@ -247,6 +253,37 @@ const SCHEDULE_DELETE_TOOL = {
   }),
 };
 
+const TIMEZONE_GET_TOOL = {
+  name: TIMEZONE_GET_TOOL_NAME,
+  description: "Get timezone settings for the current Telegram chat and show current UTC/local time.",
+  parameters: Type.Object({}),
+};
+
+const TIMEZONE_SET_TOOL = {
+  name: TIMEZONE_SET_TOOL_NAME,
+  description:
+    "Set timezone for the current Telegram chat. Use IANA names like Asia/Seoul, Europe/London, America/New_York.",
+  parameters: Type.Object({
+    timezone: Type.String({
+      minLength: 1,
+      description: "IANA timezone.",
+    }),
+  }),
+};
+
+const CURRENT_TIME_GET_TOOL = {
+  name: CURRENT_TIME_GET_TOOL_NAME,
+  description:
+    "Get current time (UTC and local). Uses chat timezone by default, or a provided IANA timezone.",
+  parameters: Type.Object({
+    timezone: Type.Optional(
+      Type.String({
+        description: "Optional IANA timezone override.",
+      }),
+    ),
+  }),
+};
+
 function trim(value) {
   return String(value ?? "").trim();
 }
@@ -445,18 +482,14 @@ function resolveSchedulerSkillEnabled(skills) {
   return true;
 }
 
-function resolveSchedulerDefaultTimezone(skills) {
-  const timezone = trim(skills?.entries?.[SCHEDULER_SKILL_KEY]?.timezone);
-  return resolveSchedulerTimezone(timezone, SCHEDULER_DEFAULT_TIMEZONE);
-}
-
 function buildSkillsPrompt({
   notionEnabled,
   webSearchEnabled,
   webFetchEnabled,
   webSearchApiKey,
   schedulerEnabled,
-  schedulerTimezone,
+  schedulerTimezoneConfigured,
+  timeContextEnabled,
 }) {
   const skills = [
     {
@@ -486,6 +519,12 @@ function buildSkillsPrompt({
     skills.push({
       name: SCHEDULER_SKILL_KEY,
       description: "Schedule delayed/absolute follow-up tasks for the current Telegram chat.",
+    });
+  }
+  if (timeContextEnabled) {
+    skills.push({
+      name: TIME_CONTEXT_SKILL_KEY,
+      description: "Current time awareness and timezone management for this Telegram chat.",
     });
   }
 
@@ -533,11 +572,19 @@ function buildSkillsPrompt({
     lines.push(
       `For reminders/scheduling, use tools \`${SCHEDULE_CREATE_TOOL_NAME}\`, \`${SCHEDULE_LIST_TOOL_NAME}\`, \`${SCHEDULE_DELETE_TOOL_NAME}\`.`,
     );
-    lines.push(
-      `Default scheduler timezone is ${schedulerTimezone}. For relative requests (e.g. "in 3 minutes"), prefer delaySeconds.`,
-    );
+    lines.push("For relative requests (e.g. 'in 3 minutes'), prefer delaySeconds.");
     lines.push(
       "For absolute local times, provide runAt plus timezone (IANA) unless runAt already includes timezone offset.",
+    );
+    if (!schedulerTimezoneConfigured) {
+      lines.push(
+        "If timezone is not configured and user asks local-time scheduling, ask timezone and set it with timezone_set first.",
+      );
+    }
+  }
+  if (timeContextEnabled) {
+    lines.push(
+      `For timezone/current-time tasks, use \`${TIMEZONE_GET_TOOL_NAME}\`, \`${TIMEZONE_SET_TOOL_NAME}\`, \`${CURRENT_TIME_GET_TOOL_NAME}\`.`,
     );
   }
 
@@ -568,6 +615,27 @@ function buildWorkspacePrompt({ workspaceRoot, isFirstTurn }) {
   return lines.join("\n");
 }
 
+function buildRuntimeClockPrompt({ nowUtcIso, timezone, localNow, timezoneConfigured, timeContextEnabled }) {
+  const lines = [
+    "## Time Context",
+    `Current UTC time: ${nowUtcIso}`,
+  ];
+  if (timezoneConfigured && timezone) {
+    lines.push(`Chat timezone: ${timezone}`);
+    if (localNow) {
+      lines.push(`Current local time (${timezone}): ${localNow}`);
+    }
+  } else if (timeContextEnabled) {
+    lines.push("Chat timezone: not set");
+    lines.push(
+      `If the user asks local-time scheduling, ask for timezone (IANA) and set it with ${TIMEZONE_SET_TOOL_NAME}.`,
+    );
+  } else {
+    lines.push("Timezone context: unavailable in this runtime.");
+  }
+  return lines.join("\n");
+}
+
 function buildSystemPrompt({
   instructions,
   notionEnabled,
@@ -575,9 +643,11 @@ function buildSystemPrompt({
   webFetchEnabled,
   webSearchApiKey,
   schedulerEnabled,
-  schedulerTimezone,
+  schedulerTimezoneConfigured,
+  timeContextEnabled,
   workspaceRoot,
   isFirstTurn,
+  runtimeClockPrompt,
 }) {
   const skillsPrompt = buildSkillsPrompt({
     notionEnabled,
@@ -585,13 +655,14 @@ function buildSystemPrompt({
     webFetchEnabled,
     webSearchApiKey,
     schedulerEnabled,
-    schedulerTimezone,
+    schedulerTimezoneConfigured,
+    timeContextEnabled,
   });
   const workspacePrompt = buildWorkspacePrompt({
     workspaceRoot,
     isFirstTurn,
   });
-  return [instructions, workspacePrompt, skillsPrompt].filter(Boolean).join("\n\n");
+  return [instructions, workspacePrompt, runtimeClockPrompt, skillsPrompt].filter(Boolean).join("\n\n");
 }
 
 function collectToolCalls(message, toolNames) {
@@ -1039,6 +1110,24 @@ function resolveToolTarget(toolName, args) {
       path: truncateToolPath(trim(args?.jobId)),
     };
   }
+  if (toolName === TIMEZONE_GET_TOOL_NAME) {
+    return {
+      method: "GET",
+      path: "timezone",
+    };
+  }
+  if (toolName === TIMEZONE_SET_TOOL_NAME) {
+    return {
+      method: "SET",
+      path: truncateToolPath(trim(args?.timezone)),
+    };
+  }
+  if (toolName === CURRENT_TIME_GET_TOOL_NAME) {
+    return {
+      method: "GET",
+      path: truncateToolPath(trim(args?.timezone) || "current-time"),
+    };
+  }
   return {
     method: "",
     path: "",
@@ -1480,6 +1569,130 @@ function resolveRuntimeScheduleContext(params) {
   };
 }
 
+function resolveRuntimeTelegramContext(params) {
+  const channel = trim(params?.runtime?.channel).toLowerCase();
+  const chatId = trim(params?.runtime?.chatId);
+  if (channel !== "telegram" || !chatId) {
+    return {
+      ok: false,
+      error: "This tool is available only in Telegram chat context.",
+    };
+  }
+  return {
+    ok: true,
+    channel,
+    chatId,
+  };
+}
+
+function buildNowPayload(timezone) {
+  const nowMs = Date.now();
+  const nowUtc = new Date(nowMs).toISOString();
+  const safeTimezone = trim(timezone);
+  if (!safeTimezone || !isValidSchedulerTimezone(safeTimezone)) {
+    return {
+      nowUtc,
+      timezoneConfigured: false,
+      timezone: null,
+      nowLocal: null,
+    };
+  }
+  return {
+    nowUtc,
+    timezoneConfigured: true,
+    timezone: resolveSchedulerTimezone(safeTimezone),
+    nowLocal: formatDateTimeInTimezone(nowMs, safeTimezone),
+  };
+}
+
+async function executeTimezoneGetToolCall(params) {
+  const runtime = resolveRuntimeTelegramContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  const timezone = await getTelegramChatTimezone({
+    customConfigPath: params?.configPath,
+    chatId: runtime.chatId,
+  });
+  const now = buildNowPayload(timezone);
+  return {
+    ok: true,
+    timezoneConfigured: now.timezoneConfigured,
+    timezone: now.timezone,
+    nowUtc: now.nowUtc,
+    nowLocal: now.nowLocal,
+  };
+}
+
+async function executeTimezoneSetToolCall(params) {
+  const runtime = resolveRuntimeTelegramContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  const result = await setTelegramChatTimezone({
+    customConfigPath: params?.configPath,
+    chatId: runtime.chatId,
+    timezone: params?.timezone,
+  });
+  if (!result?.ok) {
+    return result;
+  }
+  const now = buildNowPayload(result.timezone);
+  return {
+    ok: true,
+    timezone: result.timezone,
+    timezoneConfigured: true,
+    nowUtc: now.nowUtc,
+    nowLocal: now.nowLocal,
+  };
+}
+
+async function executeCurrentTimeGetToolCall(params) {
+  const runtime = resolveRuntimeTelegramContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  const timezoneArg = trim(params?.timezone);
+  let timezone = "";
+  if (timezoneArg) {
+    if (!isValidSchedulerTimezone(timezoneArg)) {
+      return {
+        ok: false,
+        error:
+          "Invalid timezone. Use IANA timezone like Asia/Seoul, Europe/London, or America/New_York.",
+      };
+    }
+    timezone = resolveSchedulerTimezone(timezoneArg);
+  } else {
+    timezone = await getTelegramChatTimezone({
+      customConfigPath: params?.configPath,
+      chatId: runtime.chatId,
+    });
+  }
+
+  const now = buildNowPayload(timezone);
+  return {
+    ok: true,
+    timezoneConfigured: now.timezoneConfigured,
+    timezone: now.timezone,
+    nowUtc: now.nowUtc,
+    nowLocal: now.nowLocal,
+    unixMs: Date.now(),
+  };
+}
+
 async function executeScheduleCreateToolCall(params) {
   const runtime = resolveRuntimeScheduleContext(params);
   if (!runtime.ok) {
@@ -1604,12 +1817,29 @@ export async function requestCodexResponse(params) {
 
   const webFetchEnabled = resolveWebFetchSkillEnabled(params?.skills);
   const schedulerEnabled = resolveSchedulerSkillEnabled(params?.skills);
-  const schedulerTimezone = resolveSchedulerDefaultTimezone(params?.skills);
   const runtimeChannel = trim(params?.runtime?.channel).toLowerCase();
   const runtimeChatId = trim(params?.runtime?.chatId);
   const runtimeSessionId = trim(params?.runtime?.sessionId);
+  const runtimeHasTelegramContext = runtimeChannel === "telegram" && Boolean(runtimeChatId);
+  const runtimeTimezoneFromStore = runtimeHasTelegramContext
+    ? await getTelegramChatTimezone({
+        customConfigPath: params?.configPath,
+        chatId: runtimeChatId,
+      })
+    : "";
+  const schedulerTimezone = runtimeTimezoneFromStore || "";
   const schedulerRuntimeEnabled =
     schedulerEnabled && Boolean(runtimeChannel && runtimeChatId && runtimeSessionId);
+  const timeContextEnabled = runtimeHasTelegramContext;
+  const nowUtcIso = new Date().toISOString();
+  const localNow = schedulerTimezone ? formatDateTimeInTimezone(Date.now(), schedulerTimezone) : "";
+  const runtimeClockPrompt = buildRuntimeClockPrompt({
+    nowUtcIso,
+    timezone: schedulerTimezone,
+    localNow,
+    timezoneConfigured: Boolean(schedulerTimezone),
+    timeContextEnabled,
+  });
 
   const model = resolveCodexModel(modelId);
   const history = normalizeConversationMessages(params?.messages, model);
@@ -1637,9 +1867,11 @@ export async function requestCodexResponse(params) {
     webFetchEnabled,
     webSearchApiKey,
     schedulerEnabled: schedulerRuntimeEnabled,
-    schedulerTimezone,
+    schedulerTimezoneConfigured: Boolean(schedulerTimezone),
+    timeContextEnabled,
     workspaceRoot,
     isFirstTurn,
+    runtimeClockPrompt,
   });
 
   const messages =
@@ -1679,6 +1911,47 @@ export async function requestCodexResponse(params) {
       workspaceRoot,
     }),
   );
+
+  if (timeContextEnabled) {
+    enabledTools.push(TIMEZONE_GET_TOOL);
+    toolHandlers.set(TIMEZONE_GET_TOOL_NAME, async (rawArgs) =>
+      executeTimezoneGetToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+      }),
+    );
+
+    enabledTools.push(TIMEZONE_SET_TOOL);
+    toolHandlers.set(TIMEZONE_SET_TOOL_NAME, async (rawArgs) =>
+      executeTimezoneSetToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+      }),
+    );
+
+    enabledTools.push(CURRENT_TIME_GET_TOOL);
+    toolHandlers.set(CURRENT_TIME_GET_TOOL_NAME, async (rawArgs) =>
+      executeCurrentTimeGetToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+      }),
+    );
+  }
 
   if (notionEnabled) {
     enabledTools.push(NOTION_TOOL);

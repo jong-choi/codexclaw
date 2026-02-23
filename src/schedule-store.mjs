@@ -281,7 +281,7 @@ function resolveTimezoneOffsetMinutes(utcMs, timezone) {
   return parseTimezoneOffsetMinutes(token);
 }
 
-function formatUtcMsInTimezone(utcMs, timezone) {
+export function formatDateTimeInTimezone(utcMs, timezone) {
   const formatter = new Intl.DateTimeFormat("sv-SE", {
     timeZone: timezone,
     year: "numeric",
@@ -328,7 +328,16 @@ function parseRunAtUtcMs({ runAt, timezone, defaultTimezone, nowMs }) {
     };
   }
 
-  const targetTimezone = resolveSchedulerTimezone(timezone, defaultTimezone);
+  const fromArg = trim(timezone);
+  const fromDefault = trim(defaultTimezone);
+  if (!fromArg && !fromDefault) {
+    return {
+      ok: false,
+      error:
+        "Timezone is required for local runAt without offset. Set timezone first, or include offset in runAt.",
+    };
+  }
+  const targetTimezone = resolveSchedulerTimezone(fromArg, fromDefault || DEFAULT_TIMEZONE);
   const utcGuess = Date.UTC(
     local.year,
     local.month - 1,
@@ -344,7 +353,7 @@ function parseRunAtUtcMs({ runAt, timezone, defaultTimezone, nowMs }) {
     runAtMs = utcGuess - offset2 * 60_000;
   }
 
-  const renderedLocal = formatUtcMsInTimezone(runAtMs, targetTimezone);
+  const renderedLocal = formatDateTimeInTimezone(runAtMs, targetTimezone);
   const expectedLocal = `${String(local.year).padStart(4, "0")}-${String(local.month).padStart(2, "0")}-${String(
     local.day,
   ).padStart(2, "0")} ${String(local.hour).padStart(2, "0")}:${String(local.minute).padStart(2, "0")}:${String(
@@ -420,7 +429,7 @@ function serializeJob(job, timezone, nowMs = Date.now()) {
     prompt: job.prompt,
     timezone: targetTimezone,
     runAtUtc: new Date(runAtMs).toISOString(),
-    runAtLocal: formatUtcMsInTimezone(runAtMs, targetTimezone),
+    runAtLocal: formatDateTimeInTimezone(runAtMs, targetTimezone),
     secondsUntilRun:
       Number.isFinite(runAtMs) && runAtMs > nowMs ? Math.max(0, Math.round((runAtMs - nowMs) / 1000)) : 0,
     createdAtUtc: createdAtMs ? new Date(createdAtMs).toISOString() : undefined,
@@ -435,7 +444,8 @@ export async function createScheduledJob(params) {
   const chatId = trim(params?.chatId);
   const sessionId = trim(params?.sessionId);
   const prompt = clampText(params?.prompt, MAX_PROMPT_CHARS);
-  const defaultTimezone = resolveSchedulerTimezone(params?.defaultTimezone, DEFAULT_TIMEZONE);
+  const rawDefaultTimezone = trim(params?.defaultTimezone);
+  const defaultTimezone = rawDefaultTimezone && isValidTimezone(rawDefaultTimezone) ? rawDefaultTimezone : "";
   const nowMs = Date.now();
 
   if (!channel || !chatId || !sessionId) {

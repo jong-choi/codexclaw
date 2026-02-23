@@ -22,6 +22,7 @@ Rules:
 - For "in N minutes/hours" requests, prefer `delaySeconds`.
 - For local absolute time, pass `runAt` + `timezone`.
 - If `runAt` already includes offset (`Z`, `+09:00`), timezone is optional.
+- If chat timezone is not configured, ask user and set it with `timezone_set`.
 
 `schedule_list`
 - `status` (optional): `pending`, `running`, `completed`, `failed`, `canceled`, `all`

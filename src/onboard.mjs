@@ -7,7 +7,6 @@ import {
   LEGACY_CODEX_MODEL_ID_ALIASES,
   NOTION_API_ENV_NAME,
   NOTION_SKILL_KEY,
-  SCHEDULER_DEFAULT_TIMEZONE,
   SCHEDULER_SKILL_KEY,
   WORKSPACE_DEFAULT_ROOT_DIR,
   WEB_FETCH_SKILL_KEY,
@@ -15,7 +14,6 @@ import {
 } from "./constants.mjs";
 import { loginCodexOAuth } from "./oauth.mjs";
 import { withPrompter } from "./prompt.mjs";
-import { isValidSchedulerTimezone, resolveSchedulerTimezone } from "./schedule-store.mjs";
 import { ensureWorkspaceInitialized, inspectWorkspace, resolveWorkspaceRoot } from "./workspace.mjs";
 
 function trim(value) {
@@ -102,11 +100,6 @@ function resolveSchedulerSkillEnabled(config) {
   return resolveSkillEnabled(config, SCHEDULER_SKILL_KEY);
 }
 
-function resolveSchedulerSkillTimezone(config) {
-  const timezone = trim(config?.skills?.entries?.[SCHEDULER_SKILL_KEY]?.timezone);
-  return resolveSchedulerTimezone(timezone, SCHEDULER_DEFAULT_TIMEZONE);
-}
-
 function resolveConfiguredWorkspaceRoot(config) {
   const fromConfig = trim(config?.workspace?.root);
   if (fromConfig) {
@@ -144,7 +137,7 @@ export async function runOnboard(options = {}) {
         "3) Configure Telegram bot",
         "4) Optional: configure Notion skill API key",
         "5) Optional: configure web_search/web_fetch skills",
-        "6) Optional: configure scheduler skill + default timezone",
+        "6) Optional: configure scheduler skill",
       ].join("\n"),
       "Scope",
     );
@@ -355,9 +348,7 @@ export async function runOnboard(options = {}) {
     }
 
     const existingSchedulerEnabled = resolveSchedulerSkillEnabled(next);
-    const existingSchedulerTimezone = resolveSchedulerSkillTimezone(next);
     let enableScheduler = false;
-    let schedulerTimezone = existingSchedulerTimezone;
 
     if (existingSchedulerEnabled) {
       const keep = await prompter.confirm({
@@ -371,33 +362,12 @@ export async function runOnboard(options = {}) {
           message: "Enable scheduler skill now? (optional)",
           initialValue: false,
         });
-        schedulerTimezone = SCHEDULER_DEFAULT_TIMEZONE;
       }
     } else {
       enableScheduler = await prompter.confirm({
         message: "Enable scheduler skill now? (optional)",
         initialValue: false,
       });
-    }
-
-    if (enableScheduler) {
-      let acceptedTimezone = false;
-      while (!acceptedTimezone) {
-        schedulerTimezone = await prompter.text({
-          message: "Scheduler default timezone (IANA, e.g. Asia/Seoul)",
-          initialValue: schedulerTimezone || SCHEDULER_DEFAULT_TIMEZONE,
-          required: true,
-        });
-        if (isValidSchedulerTimezone(schedulerTimezone)) {
-          acceptedTimezone = true;
-          schedulerTimezone = resolveSchedulerTimezone(schedulerTimezone, SCHEDULER_DEFAULT_TIMEZONE);
-          break;
-        }
-        prompter.note(
-          "Invalid timezone. Use IANA format like Asia/Seoul, Europe/London, or America/New_York.",
-          "Invalid timezone",
-        );
-      }
     }
 
     const nextSkillEntries = resolveSkillEntries(next);
@@ -431,9 +401,7 @@ export async function runOnboard(options = {}) {
 
     if (enableScheduler) {
       nextSkillEntries[SCHEDULER_SKILL_KEY] = {
-        ...(nextSkillEntries[SCHEDULER_SKILL_KEY] ?? {}),
         enabled: true,
-        timezone: resolveSchedulerTimezone(schedulerTimezone, SCHEDULER_DEFAULT_TIMEZONE),
       };
     } else {
       delete nextSkillEntries[SCHEDULER_SKILL_KEY];
@@ -474,7 +442,6 @@ export async function runOnboard(options = {}) {
     const webSearchKeyConfigured = Boolean(resolveSkillApiKey(saved.config, WEB_SEARCH_SKILL_KEY));
     const webFetchEnabled = resolveWebFetchSkillEnabled(saved.config);
     const schedulerEnabled = resolveSchedulerSkillEnabled(saved.config);
-    const schedulerTimezoneSummary = resolveSchedulerSkillTimezone(saved.config);
 
     prompter.outro(
       [
@@ -493,9 +460,7 @@ export async function runOnboard(options = {}) {
           : "Web search auth source: not configured",
         `Web fetch skill: ${webFetchEnabled ? "enabled" : "disabled"}`,
         `Scheduler skill: ${schedulerEnabled ? "enabled" : "disabled"}`,
-        schedulerEnabled
-          ? `Scheduler default timezone: skills.entries.${SCHEDULER_SKILL_KEY}.timezone -> ${schedulerTimezoneSummary}`
-          : "Scheduler default timezone: not configured",
+        "Scheduler timezone: set in Telegram chat via timezone_set tool",
         `Workspace root: ${workspaceInit.workspaceRoot}`,
         `Workspace template: ${workspaceInit.templateRoot}`,
         `Workspace template copied: ${workspaceInit.seededFromTemplate ? "yes" : "no (already initialized)"}`,

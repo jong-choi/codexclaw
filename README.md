@@ -132,10 +132,11 @@ Web tools (optional):
 
 Scheduler (optional):
 - During onboarding, you can enable `scheduler` skill.
-- Default timezone is stored at `skills.entries.scheduler.timezone` (IANA, e.g. `Asia/Seoul`).
 - `schedule_create`: delay-based or absolute time scheduling
 - `schedule_list`: inspect current registered jobs
 - `schedule_delete`: cancel one job
+- Chat timezone tools: `timezone_get`, `timezone_set`, `current_time_get`
+- Timezone is configured during Telegram chat (`timezone_set`), not during onboarding.
 - Scheduled tasks are chat-scoped and trigger a new Codex run when due.
 
 Workspace files (always available):
@@ -160,6 +161,7 @@ Runtime behavior:
 - `/new`, `/clear`, `/reset`: clear saved context for the current chat.
 - `/context`: show the number of stored context messages.
 - Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
+- Current UTC/local time context is injected into each Codex request.
 - Due scheduled jobs are executed in the same bot process without new incoming messages.
 - The bot proactively posts a status message immediately after receiving a request.
 - While processing, it updates status periodically and during skill/tool calls.

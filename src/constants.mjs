@@ -41,6 +41,9 @@ export const SCHEDULER_SKILL_KEY = "scheduler";
 export const SCHEDULER_SKILL_DIR = "scheduler";
 export const SCHEDULER_DEFAULT_TIMEZONE = "UTC";
 
+export const TIME_CONTEXT_SKILL_KEY = "time_context";
+export const TIME_CONTEXT_SKILL_DIR = "time-context";
+
 export const WORKSPACE_FILES_SKILL_KEY = "workspace_files";
 export const WORKSPACE_FILES_SKILL_DIR = "workspace-files";
 export const WORKSPACE_DEFAULT_ROOT_DIR = ".codexclaw/workspace";
