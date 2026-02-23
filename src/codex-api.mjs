@@ -36,7 +36,7 @@ import { getTelegramChatTimezone, setTelegramChatTimezone } from "./telegram-set
 import { ensureWorkspaceInitialized, resolveWorkspaceRoot } from "./workspace.mjs";
 
 const DEFAULT_CODEX_INSTRUCTIONS =
-  "You are an AI assistant. Answer clearly and helpfully in the user's language. Do not introduce yourself with product/project names unless the user explicitly asks. If INSTRUCTIONS.md contains a Bootstrapping section, complete the bootstrap Q&A and overwrite INSTRUCTIONS.md immediately once enough information is collected.";
+  "You are an AI assistant. Answer clearly and helpfully in the user's language. Do not introduce yourself with product/project names unless the user explicitly asks.";
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 8_192;
 const MAX_TOOL_ROUNDS = 6;
@@ -2497,6 +2497,7 @@ export async function requestCodexResponse(params) {
 
   let response = null;
   const toolEvents = [];
+  const toolResults = [];
   let usage = buildZeroUsage();
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     try {
@@ -2573,6 +2574,16 @@ export async function requestCodexResponse(params) {
         durationMs: Date.now() - startedAt,
       };
       toolEvents.push(event);
+      toolResults.push({
+        toolName,
+        toolCallId,
+        ok: Boolean(result?.ok),
+        status: Number.isFinite(Number(result?.status)) ? Number(result.status) : undefined,
+        text: buildToolResultText(result),
+        round: round + 1,
+        index: i + 1,
+        total: toolCalls.length,
+      });
       await emitToolEvent(params?.onToolEvent, event);
       messages.push(buildToolResultMessage(toolCall, result));
     }
@@ -2591,6 +2602,7 @@ export async function requestCodexResponse(params) {
     text,
     payload: response,
     toolEvents,
+    toolResults,
     usage,
   };
 }

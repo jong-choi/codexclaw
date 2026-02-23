@@ -187,11 +187,23 @@ export function appendConversationTurn(params) {
     content: params?.assistantText,
     timestamp: now + 1,
   });
+  const toolContextMessages = Array.isArray(params?.toolContextTexts)
+    ? params.toolContextTexts
+        .map((entry, index) =>
+          normalizeMessage({
+            role: "assistant",
+            content: entry,
+            timestamp: now + 2 + index,
+          }),
+        )
+        .filter(Boolean)
+    : [];
 
   const nextMessages = trimHistory([
     ...existing,
     ...(userMessage ? [userMessage] : []),
     ...(assistantMessage ? [assistantMessage] : []),
+    ...toolContextMessages,
   ]);
   if (nextMessages.length === 0) {
     return normalized;

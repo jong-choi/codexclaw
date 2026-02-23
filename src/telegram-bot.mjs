@@ -841,6 +841,23 @@ function buildToolSummary(toolEvents, locale) {
   return lines.join("\n");
 }
 
+function buildToolContextHistoryTexts(toolResults) {
+  const rows = Array.isArray(toolResults)
+    ? toolResults.filter((entry) => entry && typeof entry === "object")
+    : [];
+  if (rows.length === 0) {
+    return [];
+  }
+  return rows.map((entry) => {
+    const toolName = trim(entry?.toolName) || "tool";
+    const toolCallId = trim(entry?.toolCallId);
+    const status = entry?.ok ? "ok" : "failed";
+    const header = `[tool_result] ${toolName}${toolCallId ? ` (${toolCallId})` : ""} status=${status}`;
+    const body = trim(entry?.text);
+    return body ? `${header}\n${body}` : header;
+  });
+}
+
 function resolveProactiveStatusEnabled(config) {
   if (typeof config?.telegram?.proactiveStatus === "boolean") {
     return config.telegram.proactiveStatus;
@@ -955,11 +972,13 @@ async function runDueScheduledJobs(params) {
       });
 
       await sendMessage(params?.botToken, chatId, response.text);
+      const toolContextTexts = buildToolContextHistoryTexts(response?.toolResults);
       conversationStore = appendConversationTurn({
         store: conversationStore,
         sessionId,
         userText: `[scheduled] ${trim(job?.prompt)}`,
         assistantText: response.text,
+        toolContextTexts,
       });
       conversationStoreDirty = true;
 
@@ -1468,11 +1487,13 @@ export async function runTelegramBot(options = {}) {
 
           stopTypingNow();
           await sendMessage(botToken, chatId, response.text);
+          const toolContextTexts = buildToolContextHistoryTexts(response?.toolResults);
           conversationStore = appendConversationTurn({
             store: conversationStore,
             sessionId,
             userText: text,
             assistantText: response.text,
+            toolContextTexts,
           });
           conversationStoreDirty = true;
 
