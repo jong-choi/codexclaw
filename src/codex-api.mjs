@@ -843,6 +843,58 @@ function buildZeroUsage() {
   };
 }
 
+function asUsageNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function normalizeUsage(rawUsage) {
+  const usage = rawUsage && typeof rawUsage === "object" ? rawUsage : {};
+  const cost = usage.cost && typeof usage.cost === "object" ? usage.cost : {};
+  const input = asUsageNumber(usage.input);
+  const output = asUsageNumber(usage.output);
+  const cacheRead = asUsageNumber(usage.cacheRead);
+  const cacheWrite = asUsageNumber(usage.cacheWrite);
+  const derivedTotal = input + output + cacheRead + cacheWrite;
+  const totalTokens = asUsageNumber(usage.totalTokens) || derivedTotal;
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens,
+    cost: {
+      input: asUsageNumber(cost.input),
+      output: asUsageNumber(cost.output),
+      cacheRead: asUsageNumber(cost.cacheRead),
+      cacheWrite: asUsageNumber(cost.cacheWrite),
+      total: asUsageNumber(cost.total),
+    },
+  };
+}
+
+function sumUsage(baseUsage, deltaUsage) {
+  const base = normalizeUsage(baseUsage);
+  const delta = normalizeUsage(deltaUsage);
+  return {
+    input: base.input + delta.input,
+    output: base.output + delta.output,
+    cacheRead: base.cacheRead + delta.cacheRead,
+    cacheWrite: base.cacheWrite + delta.cacheWrite,
+    totalTokens: base.totalTokens + delta.totalTokens,
+    cost: {
+      input: base.cost.input + delta.cost.input,
+      output: base.cost.output + delta.cost.output,
+      cacheRead: base.cost.cacheRead + delta.cost.cacheRead,
+      cacheWrite: base.cost.cacheWrite + delta.cost.cacheWrite,
+      total: base.cost.total + delta.cost.total,
+    },
+  };
+}
+
 function normalizeAssistantContentBlocks(rawContent) {
   if (Array.isArray(rawContent)) {
     const blocks = rawContent
@@ -2411,6 +2463,7 @@ export async function requestCodexResponse(params) {
 
   let response = null;
   const toolEvents = [];
+  let usage = buildZeroUsage();
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     try {
       response = await completeSimple(
@@ -2429,6 +2482,7 @@ export async function requestCodexResponse(params) {
     }
 
     validateAssistantResponse(response);
+    usage = sumUsage(usage, response?.usage);
 
     if (enabledToolNames.length === 0) {
       break;
@@ -2502,5 +2556,6 @@ export async function requestCodexResponse(params) {
     text,
     payload: response,
     toolEvents,
+    usage,
   };
 }

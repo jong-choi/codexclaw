@@ -198,7 +198,11 @@ Runtime behavior:
 - Multi-turn context is preserved per Telegram chat/session.
 - `/new`, `/clear`, `/reset`: clear saved context for the current chat.
 - `/context`: show the number of stored context messages.
+- `/usage`: show Codex usage totals (requests/tokens/cost) and per-chat usage.
+- `/models`: list available Codex models.
+- `/model`: show current model. `/model <id|number>` switches model immediately.
 - Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
+- Telegram command menu (`/`) is synced automatically on startup.
 - Current UTC/local time context is injected into each Codex request.
 - Due scheduled jobs are executed in the same bot process without new incoming messages.
 - The bot proactively posts a status message immediately after receiving a request.

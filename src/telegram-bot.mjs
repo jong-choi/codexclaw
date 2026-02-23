@@ -8,7 +8,12 @@ import {
   saveConversationStore,
 } from "./conversation-store.mjs";
 import { loadConfig, saveConfig } from "./config-store.mjs";
-import { LEGACY_CODEX_MODEL_ID_ALIASES, TELEGRAM_API_BASE_URL } from "./constants.mjs";
+import {
+  CODEX_MODEL_IDS,
+  CODEX_PROVIDER_ID,
+  LEGACY_CODEX_MODEL_ID_ALIASES,
+  TELEGRAM_API_BASE_URL,
+} from "./constants.mjs";
 import { resolveFreshCodexAccessToken } from "./oauth.mjs";
 import { buildPairingReply } from "./pairing-messages.mjs";
 import {
@@ -42,6 +47,16 @@ function sleep(ms) {
 const MAX_STATUS_TEXT_CHARS = 3900;
 const PROACTIVE_STATUS_INTERVAL_MS = 10_000;
 const PROACTIVE_STATUS_QUIET_AFTER_TOOL_MS = 8_000;
+const TELEGRAM_USAGE_VERSION = 1;
+
+const TELEGRAM_BOT_COMMANDS = [
+  { command: "start", description: "Show quick help" },
+  { command: "new", description: "Reset context for this chat" },
+  { command: "context", description: "Show stored context message count" },
+  { command: "usage", description: "Show Codex usage (requests/tokens/cost)" },
+  { command: "models", description: "List available Codex models" },
+  { command: "model", description: "Show or switch model (/model <id|number>)" },
+];
 
 function isInlineExitCommand(value) {
   const token = trim(value).toLowerCase();
@@ -277,6 +292,12 @@ async function clearWebhook(token) {
   });
 }
 
+async function syncTelegramCommandMenu(token) {
+  return await telegramApi(token, "setMyCommands", {
+    commands: TELEGRAM_BOT_COMMANDS,
+  });
+}
+
 function resolveModelId(config) {
   const fromStructured = normalizeCodexModelId(config?.codex?.model?.id);
   if (fromStructured) {
@@ -294,6 +315,204 @@ function resolveModelId(config) {
   return normalizeCodexModelId(ref.slice(slash + 1));
 }
 
+function resolveModelRef(modelId) {
+  return `${CODEX_PROVIDER_ID}/${trim(modelId)}`;
+}
+
+function asFiniteNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function formatInteger(value) {
+  return Math.round(asFiniteNumber(value)).toLocaleString("en-US");
+}
+
+function formatUsd(value) {
+  return asFiniteNumber(value).toFixed(6);
+}
+
+function createEmptyUsageBucket() {
+  return {
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+    costInput: 0,
+    costOutput: 0,
+    costCacheRead: 0,
+    costCacheWrite: 0,
+    costTotal: 0,
+    updatedAt: "",
+  };
+}
+
+function normalizeUsageBucket(raw) {
+  const bucket = raw && typeof raw === "object" ? raw : {};
+  return {
+    requests: Math.max(0, Math.floor(asFiniteNumber(bucket.requests))),
+    inputTokens: asFiniteNumber(bucket.inputTokens),
+    outputTokens: asFiniteNumber(bucket.outputTokens),
+    cacheReadTokens: asFiniteNumber(bucket.cacheReadTokens),
+    cacheWriteTokens: asFiniteNumber(bucket.cacheWriteTokens),
+    totalTokens: asFiniteNumber(bucket.totalTokens),
+    costInput: asFiniteNumber(bucket.costInput),
+    costOutput: asFiniteNumber(bucket.costOutput),
+    costCacheRead: asFiniteNumber(bucket.costCacheRead),
+    costCacheWrite: asFiniteNumber(bucket.costCacheWrite),
+    costTotal: asFiniteNumber(bucket.costTotal),
+    updatedAt: trim(bucket.updatedAt),
+  };
+}
+
+function normalizeUsageState(raw) {
+  const usage = raw && typeof raw === "object" ? raw : {};
+  const chatsRaw = usage.chats && typeof usage.chats === "object" ? usage.chats : {};
+  const chats = {};
+  for (const [key, value] of Object.entries(chatsRaw)) {
+    const chatId = trim(key);
+    if (!chatId) {
+      continue;
+    }
+    chats[chatId] = normalizeUsageBucket(value);
+  }
+  return {
+    version: TELEGRAM_USAGE_VERSION,
+    total: normalizeUsageBucket(usage.total),
+    chats,
+  };
+}
+
+function normalizeUsageSnapshot(rawUsage) {
+  const usage = rawUsage && typeof rawUsage === "object" ? rawUsage : {};
+  const cost = usage.cost && typeof usage.cost === "object" ? usage.cost : {};
+  const inputTokens = asFiniteNumber(usage.input);
+  const outputTokens = asFiniteNumber(usage.output);
+  const cacheReadTokens = asFiniteNumber(usage.cacheRead);
+  const cacheWriteTokens = asFiniteNumber(usage.cacheWrite);
+  const derivedTotal = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens: asFiniteNumber(usage.totalTokens) || derivedTotal,
+    costInput: asFiniteNumber(cost.input),
+    costOutput: asFiniteNumber(cost.output),
+    costCacheRead: asFiniteNumber(cost.cacheRead),
+    costCacheWrite: asFiniteNumber(cost.cacheWrite),
+    costTotal: asFiniteNumber(cost.total),
+  };
+}
+
+function applyUsageToBucket(bucket, snapshot, nowIso) {
+  const current = normalizeUsageBucket(bucket);
+  return {
+    requests: current.requests + 1,
+    inputTokens: current.inputTokens + snapshot.inputTokens,
+    outputTokens: current.outputTokens + snapshot.outputTokens,
+    cacheReadTokens: current.cacheReadTokens + snapshot.cacheReadTokens,
+    cacheWriteTokens: current.cacheWriteTokens + snapshot.cacheWriteTokens,
+    totalTokens: current.totalTokens + snapshot.totalTokens,
+    costInput: current.costInput + snapshot.costInput,
+    costOutput: current.costOutput + snapshot.costOutput,
+    costCacheRead: current.costCacheRead + snapshot.costCacheRead,
+    costCacheWrite: current.costCacheWrite + snapshot.costCacheWrite,
+    costTotal: current.costTotal + snapshot.costTotal,
+    updatedAt: nowIso,
+  };
+}
+
+function applyUsageSnapshotToConfig(config, chatId, rawUsage) {
+  if (!config || typeof config !== "object") {
+    return;
+  }
+  const normalizedChatId = trim(chatId);
+  if (!normalizedChatId) {
+    return;
+  }
+  const snapshot = normalizeUsageSnapshot(rawUsage);
+  const nowIso = new Date().toISOString();
+  const usageState = normalizeUsageState(config?.telegram?.usage);
+  usageState.total = applyUsageToBucket(usageState.total, snapshot, nowIso);
+  usageState.chats[normalizedChatId] = applyUsageToBucket(
+    usageState.chats[normalizedChatId],
+    snapshot,
+    nowIso,
+  );
+  config.telegram = {
+    ...(config.telegram ?? {}),
+    usage: usageState,
+  };
+}
+
+function buildUsageReport(config, chatId) {
+  const usageState = normalizeUsageState(config?.telegram?.usage);
+  const total = usageState.total;
+  const chat = normalizeUsageBucket(usageState.chats?.[trim(chatId)]);
+  const lines = [
+    "Codex usage",
+    "",
+    "Total:",
+    `- requests: ${formatInteger(total.requests)}`,
+    `- tokens: ${formatInteger(total.totalTokens)} (in ${formatInteger(total.inputTokens)}, out ${formatInteger(total.outputTokens)}, cache read ${formatInteger(total.cacheReadTokens)}, cache write ${formatInteger(total.cacheWriteTokens)})`,
+    `- cost: $${formatUsd(total.costTotal)} (in $${formatUsd(total.costInput)}, out $${formatUsd(total.costOutput)}, cache read $${formatUsd(total.costCacheRead)}, cache write $${formatUsd(total.costCacheWrite)})`,
+    "",
+    "This chat:",
+    `- requests: ${formatInteger(chat.requests)}`,
+    `- tokens: ${formatInteger(chat.totalTokens)} (in ${formatInteger(chat.inputTokens)}, out ${formatInteger(chat.outputTokens)}, cache read ${formatInteger(chat.cacheReadTokens)}, cache write ${formatInteger(chat.cacheWriteTokens)})`,
+    `- cost: $${formatUsd(chat.costTotal)} (in $${formatUsd(chat.costInput)}, out $${formatUsd(chat.costOutput)}, cache read $${formatUsd(chat.costCacheRead)}, cache write $${formatUsd(chat.costCacheWrite)})`,
+  ];
+  if (trim(total.updatedAt)) {
+    lines.push("", `Last updated: ${trim(total.updatedAt)}`);
+  }
+  return lines.join("\n");
+}
+
+function buildModelListMessage(currentModelId) {
+  const normalizedCurrent = normalizeCodexModelId(currentModelId);
+  const lines = ["Available Codex models:"];
+  for (let i = 0; i < CODEX_MODEL_IDS.length; i += 1) {
+    const modelId = CODEX_MODEL_IDS[i];
+    const current = modelId === normalizedCurrent ? " (current)" : "";
+    lines.push(`${i + 1}. ${resolveModelRef(modelId)}${current}`);
+  }
+  lines.push("");
+  lines.push("Use /model <id|number> to switch.");
+  lines.push("Examples: /model 3, /model gpt-5.3-codex");
+  return lines.join("\n");
+}
+
+function resolveModelSelection(value) {
+  const raw = trim(value).toLowerCase();
+  if (!raw) {
+    return "";
+  }
+
+  if (/^\d+$/.test(raw)) {
+    const index = Number.parseInt(raw, 10);
+    if (Number.isInteger(index) && index >= 1 && index <= CODEX_MODEL_IDS.length) {
+      return CODEX_MODEL_IDS[index - 1];
+    }
+    return "";
+  }
+
+  let candidate = raw;
+  if (candidate.includes("/")) {
+    candidate = candidate.slice(candidate.lastIndexOf("/") + 1);
+  }
+  const normalized = normalizeCodexModelId(candidate);
+  if (CODEX_MODEL_IDS.includes(normalized)) {
+    return normalized;
+  }
+  return "";
+}
+
 function resolveCommandToken(text) {
   const first = trim(text).split(/\s+/)[0]?.toLowerCase() ?? "";
   if (!first.startsWith("/")) {
@@ -301,6 +520,15 @@ function resolveCommandToken(text) {
   }
   const at = first.indexOf("@");
   return at >= 0 ? first.slice(0, at) : first;
+}
+
+function resolveCommandArgs(text) {
+  const raw = trim(text);
+  const firstSpace = raw.indexOf(" ");
+  if (firstSpace < 0) {
+    return "";
+  }
+  return trim(raw.slice(firstSpace + 1));
 }
 
 function isResetCommand(token) {
@@ -550,6 +778,12 @@ async function runDueScheduledJobs(params) {
       });
 
       await sendMessage(params?.botToken, chatId, response.text);
+      if (typeof params?.onUsage === "function") {
+        params.onUsage({
+          chatId,
+          usage: response?.usage,
+        });
+      }
       conversationStore = appendConversationTurn({
         store: conversationStore,
         sessionId,
@@ -595,8 +829,8 @@ export async function runTelegramBot(options = {}) {
     throw new Error("telegram.botToken is missing. Run `codexclaw onboard`.");
   }
 
-  const modelId = resolveModelId(config);
-  if (!modelId) {
+  let activeModelId = resolveModelId(config);
+  if (!activeModelId) {
     throw new Error("codex.model is missing. Run `codexclaw onboard`.");
   }
 
@@ -631,7 +865,7 @@ export async function runTelegramBot(options = {}) {
   };
 
   process.stdout.write(`CodexClaw Telegram bot is running.\n`);
-  process.stdout.write(`Model: openai-codex/${modelId}\n`);
+  process.stdout.write(`Model: ${resolveModelRef(activeModelId)}\n`);
   process.stdout.write(`DM policy: ${dmPolicy}\n`);
   process.stdout.write(`Proactive status: ${proactiveStatusEnabled ? "on" : "off"}\n`);
   process.stdout.write(`Conversation store: ${conversationState.path}\n`);
@@ -641,17 +875,29 @@ export async function runTelegramBot(options = {}) {
   const stopInlinePairingApproval =
     dmPolicy === "pairing" ? startInlinePairingApproval({ configPath, onExitRequest: requestStop }) : () => {};
 
+  try {
+    await syncTelegramCommandMenu(botToken);
+    process.stdout.write(`Telegram command menu synced (${TELEGRAM_BOT_COMMANDS.length}).\n`);
+  } catch (error) {
+    process.stderr.write(
+      `Telegram command menu sync failed: ${trim(error?.message) || String(error)}\n`,
+    );
+  }
+
   while (!shouldStop) {
     try {
       let conversationStoreDirty = false;
       const scheduledRun = await runDueScheduledJobs({
         botToken,
-        modelId,
+        modelId: activeModelId,
         codexInstructions,
         config,
         configPath,
         oauth,
         conversationStore,
+        onUsage: ({ chatId, usage }) => {
+          applyUsageSnapshotToConfig(config, chatId, usage);
+        },
       });
       oauth = scheduledRun.oauth;
       conversationStore = scheduledRun.conversationStore;
@@ -746,6 +992,8 @@ export async function runTelegramBot(options = {}) {
               "CodexClaw is connected. Send a message to talk to Codex.",
               "Use /new to reset context for this chat.",
               "Use /context to inspect stored context size.",
+              "Use /usage to inspect Codex usage.",
+              "Use /models to list models, /model to inspect current model.",
             ].join("\n"),
           );
           continue;
@@ -764,6 +1012,64 @@ export async function runTelegramBot(options = {}) {
             botToken,
             chatId,
             `Stored context messages for this chat: ${count}\nUse /new to reset context.`,
+          );
+          continue;
+        }
+
+        if (command === "/usage") {
+          await sendMessage(botToken, chatId, buildUsageReport(config, chatId));
+          continue;
+        }
+
+        if (command === "/models") {
+          await sendMessage(botToken, chatId, buildModelListMessage(activeModelId));
+          continue;
+        }
+
+        if (command === "/model") {
+          const arg = resolveCommandArgs(text);
+          if (!arg) {
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                `Current model: ${resolveModelRef(activeModelId)}`,
+                "Change model with /model <id|number>.",
+                "Examples: /model 3, /model gpt-5.3-codex",
+              ].join("\n"),
+            );
+            continue;
+          }
+          const selectedModelId = resolveModelSelection(arg);
+          if (!selectedModelId) {
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                `Unknown model: ${trim(arg)}`,
+                "Use /models to see valid options.",
+              ].join("\n"),
+            );
+            continue;
+          }
+          if (selectedModelId === activeModelId) {
+            await sendMessage(botToken, chatId, `Model unchanged: ${resolveModelRef(activeModelId)}`);
+            continue;
+          }
+          activeModelId = selectedModelId;
+          config.codex = {
+            ...(config.codex ?? {}),
+            model: {
+              id: selectedModelId,
+              ref: resolveModelRef(selectedModelId),
+            },
+          };
+          await saveConfig(config, configPath);
+          process.stdout.write(`Model switched to ${resolveModelRef(activeModelId)}.\n`);
+          await sendMessage(
+            botToken,
+            chatId,
+            `Model updated: ${resolveModelRef(activeModelId)}`,
           );
           continue;
         }
@@ -834,7 +1140,7 @@ export async function runTelegramBot(options = {}) {
           const history = getConversationHistory(conversationStore, sessionId);
           const response = await requestCodexResponse({
             accessToken: fresh.accessToken,
-            modelId,
+            modelId: activeModelId,
             instructions: codexInstructions,
             workspaceRoot: trim(config?.workspace?.root),
             isFirstTurn: history.length === 0,
@@ -866,6 +1172,7 @@ export async function runTelegramBot(options = {}) {
 
           stopTypingNow();
           await sendMessage(botToken, chatId, response.text);
+          applyUsageSnapshotToConfig(config, chatId, response?.usage);
           conversationStore = appendConversationTurn({
             store: conversationStore,
             sessionId,
