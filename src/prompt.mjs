@@ -22,7 +22,18 @@ export async function withPrompter(run) {
       ].join("");
 
       while (true) {
-        const raw = await rl.question(`${message}${suffix}: `);
+        let raw;
+        try {
+          raw = await rl.question(
+            `${message}${suffix}: `,
+            params?.signal ? { signal: params.signal } : undefined,
+          );
+        } catch (error) {
+          if (error && typeof error === "object" && error.name === "AbortError") {
+            throw error;
+          }
+          throw error;
+        }
         const picked = normalize(raw || initialValue);
         if (required && !picked) {
           output.write("Required.\n");
