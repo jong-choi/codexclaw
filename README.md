@@ -15,6 +15,43 @@ cd codexclaw
 npm install
 ```
 
+## Docker
+
+Build and run:
+
+```bash
+docker compose up --build -d
+```
+
+Run onboarding (interactive, manual OAuth redirect URL paste):
+
+```bash
+docker compose run --rm codexclaw onboard
+```
+
+Show redacted config:
+
+```bash
+docker compose run --rm codexclaw config show
+```
+
+Cleanup helper (interactive):
+
+```bash
+./scripts/uninstall.sh
+```
+
+The script checks existing resources first, then asks per item:
+- Running project containers → ask to run `docker compose down`
+- Project images → ask to delete images
+- Project volumes → ask to delete volumes
+- Docker build cache → ask to delete build cache
+- Global config (`~/.codexclaw`) → ask to delete global config
+
+Notes:
+- If nothing exists in a category, that question is skipped.
+- Project source files are never deleted.
+
 ## Onboard
 
 ```bash
@@ -58,6 +95,23 @@ Runtime behavior:
 - The bot proactively posts a status message immediately after receiving a request.
 - While processing, it updates status periodically and during skill/tool calls.
 - It posts final completion/failure status, plus a skill execution log when tools were used.
+
+### Telegram Status Updates (feature)
+
+CodexClaw treats status delivery as a runtime feature (not prompt wording):
+- Creates a status message as soon as a user request is received.
+- Edits the same message in place while processing (`status: processing (Xs)`).
+- Reflects tool lifecycle events (start/result, method/path, success/failure).
+- Finalizes with `status: completed` or `status: failed`.
+- Appends a compact `Skill execution log` when tools are used.
+
+Timing behavior:
+- Periodic working update interval: `10s`
+- Quiet window after tool events: `8s`
+
+Language behavior:
+- Korean status text for Korean user input.
+- English status text otherwise.
 
 Optional config:
 - Set `telegram.proactiveStatus` to `false` to disable proactive status messages.

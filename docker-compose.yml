@@ -1,0 +1,18 @@
+services:
+  codexclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: codexclaw:local
+    container_name: codexclaw
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+    volumes:
+      - codexclaw_data:/home/node/.codexclaw
+    command: ["telegram", "run"]
+
+volumes:
+  codexclaw_data:
