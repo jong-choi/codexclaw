@@ -24,7 +24,7 @@ npm install
 
 ## Docker
 
-Build and run:
+Build image and start utility container (does not auto-run Telegram bot):
 
 ```bash
 docker compose up --build -d
@@ -35,6 +35,34 @@ Run onboarding (interactive, manual OAuth redirect URL paste):
 ```bash
 docker compose run --rm codexclaw onboard
 ```
+
+Run Telegram bot with Docker (interactive, recommended for pairing code input):
+
+```bash
+docker compose run --rm codexclaw telegram run
+```
+
+Recommended flow:
+- First run: use `--rm` interactive mode to approve pairing code in terminal.
+- After pairing is complete: run detached mode (`-d`) so the bot keeps running on server.
+
+Run Telegram bot in detached mode:
+
+```bash
+docker compose run -d --name codexclaw-telegram codexclaw telegram run
+docker logs -f codexclaw-telegram
+```
+
+Stop detached bot:
+
+```bash
+docker stop codexclaw-telegram
+docker rm codexclaw-telegram
+```
+
+Important:
+- Start only one Telegram polling instance for a token.
+- Do not run `docker compose run --rm codexclaw telegram run` while another bot instance is already running.
 
 Show redacted config:
 

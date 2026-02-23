@@ -17,4 +17,4 @@ RUN mkdir -p /home/node/.codexclaw && chown -R node:node /app /home/node/.codexc
 USER node
 
 ENTRYPOINT ["node", "./bin/codexclaw.mjs"]
-CMD ["telegram", "run"]
+CMD ["help"]

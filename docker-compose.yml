@@ -12,7 +12,7 @@ services:
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
     volumes:
       - codexclaw_data:/home/node/.codexclaw
-    command: ["telegram", "run"]
+    command: ["sh", "-lc", "sleep infinity"]
 
 volumes:
   codexclaw_data:
