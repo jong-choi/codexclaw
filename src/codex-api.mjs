@@ -173,7 +173,57 @@ function collectToolCalls(message, toolName) {
   );
 }
 
-function normalizeConversationMessages(rawMessages) {
+function buildZeroUsage() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+    },
+  };
+}
+
+function normalizeAssistantContentBlocks(rawContent) {
+  if (Array.isArray(rawContent)) {
+    const blocks = rawContent
+      .map((block) => {
+        if (!block || typeof block !== "object") {
+          return null;
+        }
+        if (block.type === "text" && typeof block.text === "string" && trim(block.text)) {
+          return {
+            type: "text",
+            text: trim(block.text),
+          };
+        }
+        return null;
+      })
+      .filter(Boolean);
+    if (blocks.length > 0) {
+      return blocks;
+    }
+  }
+
+  const text = trim(rawContent);
+  if (!text) {
+    return [];
+  }
+  return [
+    {
+      type: "text",
+      text,
+    },
+  ];
+}
+
+function normalizeConversationMessages(rawMessages, model) {
   if (!Array.isArray(rawMessages)) {
     return [];
   }
@@ -187,15 +237,34 @@ function normalizeConversationMessages(rawMessages) {
     if (role !== "user" && role !== "assistant") {
       continue;
     }
-    const content = trim(raw.content);
-    if (!content) {
-      continue;
-    }
     const timestampRaw = Number(raw.timestamp);
     const timestamp = Number.isFinite(timestampRaw) && timestampRaw > 0 ? timestampRaw : Date.now();
+
+    if (role === "user") {
+      const content = trim(raw.content);
+      if (!content) {
+        continue;
+      }
+      out.push({
+        role: "user",
+        content,
+        timestamp,
+      });
+      continue;
+    }
+
+    const contentBlocks = normalizeAssistantContentBlocks(raw.content);
+    if (contentBlocks.length === 0) {
+      continue;
+    }
     out.push({
-      role,
-      content,
+      role: "assistant",
+      content: contentBlocks,
+      api: trim(model?.api),
+      provider: trim(model?.provider),
+      model: trim(model?.id),
+      usage: buildZeroUsage(),
+      stopReason: "stop",
       timestamp,
     });
   }
@@ -374,7 +443,8 @@ export async function requestCodexResponse(params) {
   const instructions = trim(params?.instructions) || DEFAULT_CODEX_INSTRUCTIONS;
   const notionApiKey = resolveNotionApiKey(params?.skills);
   const notionEnabled = Boolean(notionApiKey);
-  const history = normalizeConversationMessages(params?.messages);
+  const model = resolveCodexModel(modelId);
+  const history = normalizeConversationMessages(params?.messages, model);
 
   if (!accessToken) {
     throw new Error("Missing access token.");
@@ -386,7 +456,6 @@ export async function requestCodexResponse(params) {
     throw new Error("Message is empty.");
   }
 
-  const model = resolveCodexModel(modelId);
   const systemPrompt = buildSystemPrompt({ instructions, notionEnabled });
   const messages =
     history.length > 0
