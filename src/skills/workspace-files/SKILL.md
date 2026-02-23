@@ -33,4 +33,7 @@ Use these tools when the user asks to create, update, read, or delete files in t
 ## Working rules
 
 - For memory updates, prefer appending concise entries instead of rewriting entire files.
+- You may update `MEMORY.md` proactively without explicit user request when durable preferences, decisions, or project facts should be remembered.
+- Update `INSTRUCTIONS.md` only when the user explicitly asks for it, or clearly approves a proposed change.
+- If instruction-change intent is ambiguous, ask a quick confirmation before writing `INSTRUCTIONS.md`.
 - Never claim file changes unless a workspace tool call actually succeeded.

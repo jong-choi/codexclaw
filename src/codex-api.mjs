@@ -36,7 +36,7 @@ import { getTelegramChatTimezone, setTelegramChatTimezone } from "./telegram-set
 import { ensureWorkspaceInitialized, resolveWorkspaceRoot } from "./workspace.mjs";
 
 const DEFAULT_CODEX_INSTRUCTIONS =
-  "You are CodexClaw. Answer clearly and helpfully in the user's language.";
+  "You are an AI assistant. Answer clearly and helpfully in the user's language. Do not introduce yourself with product/project names unless the user explicitly asks. If INSTRUCTIONS.md contains a Bootstrapping section, complete the bootstrap Q&A and overwrite INSTRUCTIONS.md immediately once enough information is collected.";
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 8_192;
 const MAX_TOOL_ROUNDS = 6;
@@ -762,13 +762,18 @@ function buildWorkspacePrompt({ workspaceRoot, isFirstTurn }) {
     `Workspace root: ${workspaceRoot}`,
     `Memory file: ${WORKSPACE_MEMORY_FILE_NAME}`,
     `Instruction file: ${WORKSPACE_INSTRUCTIONS_FILE_NAME}`,
+    "Priority rule: INSTRUCTIONS.md and MEMORY.md are the primary chat-level behavior/context source.",
+    "If they conflict with generic system wording, prefer INSTRUCTIONS.md and MEMORY.md unless it violates hard safety constraints.",
     "workspace_* tools are only for files under Workspace root.",
     "Do not use workspace_* tools for repository source paths such as src/, skills/, bin/, docs/, README.md.",
     "Never claim workspace file changes unless you actually executed workspace tools.",
+    "Memory update rule: you may update MEMORY.md proactively when it improves future replies.",
+    "Instruction update rule: modify INSTRUCTIONS.md only when the user explicitly asks for it, or clearly consents after your proposal.",
+    "When a user asks to change instructions, apply the update directly with workspace_write_file and report exactly what changed.",
   ];
   if (isFirstTurn) {
     lines.push(
-      "First-turn rule: before final response, check MEMORY.md and INSTRUCTIONS.md in workspace.",
+      "First-turn rule: before final response, ensure MEMORY.md and INSTRUCTIONS.md both exist, then read both files. ",
     );
     lines.push(
       "On first turn, do not read any other workspace file unless the user explicitly asks for it.",
@@ -776,6 +781,7 @@ function buildWorkspacePrompt({ workspaceRoot, isFirstTurn }) {
     lines.push(
       "If either file is missing, create it with workspace_write_file (empty content is allowed), then read both files.",
     );
+    lines.push("On first turn, apply INSTRUCTIONS.md and MEMORY.md context before producing the final answer.");
   }
   return lines.join("\n");
 }
