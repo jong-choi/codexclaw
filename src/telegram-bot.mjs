@@ -37,15 +37,21 @@ const MAX_STATUS_TEXT_CHARS = 3900;
 const PROACTIVE_STATUS_INTERVAL_MS = 10_000;
 const PROACTIVE_STATUS_QUIET_AFTER_TOOL_MS = 8_000;
 
+function isInlineExitCommand(value) {
+  const token = trim(value).toLowerCase();
+  return token === "/bye" || token === "/exit";
+}
+
 function startInlinePairingApproval(params) {
   const configPath = params?.configPath;
+  const onExitRequest = typeof params?.onExitRequest === "function" ? params.onExitRequest : null;
   if (!process.stdin || !process.stdin.isTTY) {
     process.stdout.write("Inline pairing input disabled (non-interactive terminal).\n");
     return () => {};
   }
 
   process.stdout.write(
-    "Enter pairing code in this terminal and press Enter to approve sender (empty line = ignore).\n",
+    "Enter pairing code in this terminal and press Enter to approve sender (empty line = ignore, /bye or /exit = stop bot).\n",
   );
 
   process.stdin.setEncoding("utf8");
@@ -61,10 +67,15 @@ function startInlinePairingApproval(params) {
     try {
       while (queue.length > 0) {
         const raw = queue.shift();
-        const code = trim(raw).toUpperCase();
-        if (!code) {
+        const line = trim(raw);
+        if (!line) {
           continue;
         }
+        if (isInlineExitCommand(line)) {
+          onExitRequest?.();
+          break;
+        }
+        const code = line.toUpperCase();
 
         try {
           const approved = await approveChannelPairingCode({
@@ -156,12 +167,13 @@ function canUseSender(senderId, allowFrom) {
   return allowFrom.includes(normalizedSender);
 }
 
-async function telegramApi(token, method, body) {
+async function telegramApi(token, method, body, options = {}) {
   const url = `${TELEGRAM_API_BASE_URL}/bot${token}/${method}`;
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
+    signal: options?.signal,
   });
 
   let payload = null;
@@ -237,12 +249,17 @@ function startTypingHeartbeat(token, chatId, intervalMs = 4_500) {
   return () => clearInterval(timer);
 }
 
-async function getUpdates(token, offset) {
-  return await telegramApi(token, "getUpdates", {
-    timeout: 30,
-    offset,
-    allowed_updates: ["message"],
-  });
+async function getUpdates(token, offset, signal) {
+  return await telegramApi(
+    token,
+    "getUpdates",
+    {
+      timeout: 30,
+      offset,
+      allowed_updates: ["message"],
+    },
+    { signal },
+  );
 }
 
 async function clearWebhook(token) {
@@ -418,6 +435,30 @@ function resolveProactiveStatusEnabled(config) {
   return true;
 }
 
+function formatErrorAsJson(error) {
+  const payload = {
+    name: trim(error?.name) || "Error",
+    message: trim(error?.message) || String(error),
+  };
+  if (trim(error?.stack)) {
+    payload.stack = trim(error.stack);
+  }
+  if (error?.cause !== undefined) {
+    payload.cause =
+      error.cause && typeof error.cause === "object"
+        ? {
+            name: trim(error.cause?.name),
+            message: trim(error.cause?.message) || String(error.cause),
+            code: trim(error.cause?.code),
+            errno: error.cause?.errno,
+            syscall: trim(error.cause?.syscall),
+            hostname: trim(error.cause?.hostname),
+          }
+        : String(error.cause);
+  }
+  return JSON.stringify(payload);
+}
+
 export async function runTelegramBot(options = {}) {
   const loaded = await loadConfig(options.configPath);
   const configPath = loaded.path;
@@ -454,6 +495,17 @@ export async function runTelegramBot(options = {}) {
   const conversationState = await loadConversationStore(configPath);
   let conversationStore = conversationState.store;
   let triedWebhookReset = false;
+  let shouldStop = false;
+  let pollingAbortController = null;
+  const requestStop = () => {
+    if (shouldStop) {
+      return;
+    }
+    shouldStop = true;
+    pollingAbortController?.abort();
+    pollingAbortController = null;
+    process.stdout.write("Exit command received. Stopping CodexClaw Telegram bot.\n");
+  };
 
   process.stdout.write(`CodexClaw Telegram bot is running.\n`);
   process.stdout.write(`Model: openai-codex/${modelId}\n`);
@@ -463,15 +515,19 @@ export async function runTelegramBot(options = {}) {
   if (dmPolicy === "pairing") {
     process.stdout.write("Unknown DM senders will receive a pairing code.\n");
   }
-  if (dmPolicy === "pairing") {
-    startInlinePairingApproval({ configPath });
-  }
+  const stopInlinePairingApproval =
+    dmPolicy === "pairing" ? startInlinePairingApproval({ configPath, onExitRequest: requestStop }) : () => {};
 
-  while (true) {
+  while (!shouldStop) {
     try {
       let conversationStoreDirty = false;
-      const updates = await getUpdates(botToken, offset);
+      pollingAbortController = new AbortController();
+      const updates = await getUpdates(botToken, offset, pollingAbortController.signal);
+      pollingAbortController = null;
       for (const update of updates) {
+        if (shouldStop) {
+          break;
+        }
         const updateId = Number(update?.update_id);
         if (Number.isFinite(updateId)) {
           offset = Math.max(offset, updateId + 1);
@@ -700,6 +756,13 @@ export async function runTelegramBot(options = {}) {
         conversationStore = savedConversations.store;
       }
     } catch (error) {
+      pollingAbortController = null;
+      if (shouldStop && error?.name === "AbortError") {
+        break;
+      }
+      if (shouldStop) {
+        break;
+      }
       const message = trim(error?.message) || String(error);
 
       if (
@@ -727,8 +790,11 @@ export async function runTelegramBot(options = {}) {
           "Polling conflict (409): another bot instance may already be polling this token.\n",
         );
       }
-      process.stderr.write(`Polling error: ${message}\n`);
+      process.stderr.write(`Polling error details: ${formatErrorAsJson(error)}\n`);
       await sleep(3_000);
     }
   }
+
+  stopInlinePairingApproval();
+  process.stdout.write("CodexClaw Telegram bot stopped.\n");
 }
