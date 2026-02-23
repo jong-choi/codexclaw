@@ -619,7 +619,11 @@ export async function runTelegramBot(options = {}) {
         }
 
         await sendTyping(botToken, chatId);
-        const stopTypingHeartbeat = startTypingHeartbeat(botToken, chatId);
+        let stopTypingHeartbeat = startTypingHeartbeat(botToken, chatId);
+        const stopTypingNow = () => {
+          stopTypingHeartbeat();
+          stopTypingHeartbeat = () => {};
+        };
         const requestStartedAt = Date.now();
         const locale = resolveStatusLocale(text);
         let statusMessageId = null;
@@ -704,6 +708,7 @@ export async function runTelegramBot(options = {}) {
             },
           });
 
+          stopTypingNow();
           await sendMessage(botToken, chatId, response.text);
           conversationStore = appendConversationTurn({
             store: conversationStore,
@@ -736,13 +741,14 @@ export async function runTelegramBot(options = {}) {
           } else if (proactiveStatusEnabled) {
             await upsertStatus(failedLine);
           }
+          stopTypingNow();
           await sendMessage(
             botToken,
             chatId,
             `Codex request failed: ${trim(error?.message) || "unknown error"}`,
           );
         } finally {
-          stopTypingHeartbeat();
+          stopTypingNow();
           stopProactivePulse();
         }
       }
