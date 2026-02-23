@@ -625,6 +625,8 @@ export async function runTelegramBot(options = {}) {
             accessToken: fresh.accessToken,
             modelId,
             instructions: codexInstructions,
+            workspaceRoot: trim(config?.workspace?.root),
+            isFirstTurn: history.length === 0,
             messages: [
               ...history,
               {

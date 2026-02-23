@@ -7,6 +7,9 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.yml"
 DEFAULT_IMAGE="codexclaw:local"
 CONFIG_DIR="${CODEXCLAW_CONFIG_DIR:-${HOME}/.codexclaw}"
+WORKSPACE_ROOT="${CODEXCLAW_WORKSPACE_ROOT:-${PROJECT_DIR}/.codexclaw/workspace}"
+WORKSPACE_TEMPLATE_ROOT="${CODEXCLAW_WORKSPACE_TEMPLATE_ROOT:-${PROJECT_DIR}/.codexclaw/initial-workspace}"
+RESET_WORKSPACE_SCRIPT="${SCRIPT_DIR}/reset-workspace.sh"
 
 DOCKER_AVAILABLE=0
 DOCKER_DAEMON_READY=0
@@ -149,32 +152,6 @@ list_existing_project_volumes() {
   done <<< "${candidates}" | unique_lines
 }
 
-build_cache_summary() {
-  if [[ "${DOCKER_DAEMON_READY}" -ne 1 ]]; then
-    return 0
-  fi
-
-  local line
-  line="$(docker system df 2>/dev/null | awk '$1=="Build" && $2=="Cache" {print; exit}')"
-  if [[ -z "${line}" ]]; then
-    return 0
-  fi
-
-  local size reclaimable
-  size="$(printf '%s\n' "${line}" | awk '{print $5}')"
-  reclaimable="$(printf '%s\n' "${line}" | awk '{print $6}')"
-  if [[ -z "${size}" ]]; then
-    return 0
-  fi
-
-  printf '%s|%s\n' "${size}" "${reclaimable}"
-}
-
-is_zero_size() {
-  local value="${1:-}"
-  [[ "${value}" =~ ^0([.]0+)?[[:alpha:]]*$ ]]
-}
-
 print_bullet_list() {
   local items="${1:-}"
   while IFS= read -r item; do
@@ -269,25 +246,30 @@ main() {
       echo
     fi
 
-    local cache_info cache_size cache_reclaimable
-    cache_info="$(build_cache_summary)"
-    cache_size="${cache_info%%|*}"
-    cache_reclaimable="${cache_info#*|}"
-
-    if [[ -n "${cache_size}" ]] && ! is_zero_size "${cache_size}"; then
-      echo "Docker build cache detected (size: ${cache_size}, reclaimable: ${cache_reclaimable})."
-      if ask_yes_no "Delete Docker build cache?"; then
-        docker builder prune --all --force
-        echo "Docker build cache removed."
-      else
-        echo "Skipped: build cache deletion"
-      fi
-      echo
-    else
-      echo "No Docker build cache detected."
-      echo
-    fi
   fi
+
+  if [[ -d "${WORKSPACE_ROOT}" ]]; then
+    echo "Workspace directory detected: ${WORKSPACE_ROOT}"
+  else
+    echo "Workspace directory not found: ${WORKSPACE_ROOT}"
+  fi
+  if [[ -d "${WORKSPACE_TEMPLATE_ROOT}" ]]; then
+    echo "Workspace template directory: ${WORKSPACE_TEMPLATE_ROOT}"
+  else
+    echo "Workspace template directory not found: ${WORKSPACE_TEMPLATE_ROOT}"
+  fi
+  if [[ -x "${RESET_WORKSPACE_SCRIPT}" ]]; then
+    if ask_yes_no "Initialize workspace files (${WORKSPACE_ROOT})?"; then
+      CODEXCLAW_WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
+      CODEXCLAW_WORKSPACE_TEMPLATE_ROOT="${WORKSPACE_TEMPLATE_ROOT}" \
+      "${RESET_WORKSPACE_SCRIPT}" --yes
+    else
+      echo "Skipped: workspace initialization"
+    fi
+  else
+    echo "Workspace reset script not executable: ${RESET_WORKSPACE_SCRIPT}"
+  fi
+  echo
 
   if [[ -d "${CONFIG_DIR}" ]]; then
     echo "Global config directory detected: ${CONFIG_DIR}"

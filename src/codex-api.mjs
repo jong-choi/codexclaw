@@ -1,4 +1,5 @@
-import { fileURLToPath } from "node:url";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { Type, completeSimple, getModel } from "@mariozechner/pi-ai";
 import {
   BRAVE_API_ENV_NAME,
@@ -9,13 +10,14 @@ import {
   NOTION_API_BASE_URL,
   NOTION_API_ENV_NAME,
   NOTION_API_VERSION,
-  NOTION_SKILL_DIR,
   NOTION_SKILL_KEY,
-  WEB_FETCH_SKILL_DIR,
+  WORKSPACE_FILES_SKILL_KEY,
+  WORKSPACE_INSTRUCTIONS_FILE_NAME,
+  WORKSPACE_MEMORY_FILE_NAME,
   WEB_FETCH_SKILL_KEY,
-  WEB_SEARCH_SKILL_DIR,
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
+import { ensureWorkspaceInitialized, resolveWorkspaceRoot } from "./workspace.mjs";
 
 const DEFAULT_CODEX_INSTRUCTIONS =
   "You are CodexClaw. Answer clearly and helpfully in the user's language.";
@@ -27,6 +29,9 @@ const MAX_TOOL_RESULT_CHARS = 16_000;
 const NOTION_TOOL_NAME = "notion_api_request";
 const WEB_SEARCH_TOOL_NAME = "web_search";
 const WEB_FETCH_TOOL_NAME = "web_fetch";
+const WORKSPACE_READ_TOOL_NAME = "workspace_read_file";
+const WORKSPACE_WRITE_TOOL_NAME = "workspace_write_file";
+const WORKSPACE_DELETE_TOOL_NAME = "workspace_delete_path";
 
 const WEB_SEARCH_DEFAULT_COUNT = 5;
 const WEB_SEARCH_MAX_COUNT = 10;
@@ -109,14 +114,106 @@ const WEB_FETCH_TOOL = {
   }),
 };
 
-const SKILL_DIR_BY_KEY = {
-  [NOTION_SKILL_KEY]: NOTION_SKILL_DIR,
-  [WEB_SEARCH_SKILL_KEY]: WEB_SEARCH_SKILL_DIR,
-  [WEB_FETCH_SKILL_KEY]: WEB_FETCH_SKILL_DIR,
+const WORKSPACE_READ_TOOL = {
+  name: WORKSPACE_READ_TOOL_NAME,
+  description:
+    "Read a UTF-8 text file from the CodexClaw workspace. Use this to inspect memory/instruction files.",
+  parameters: Type.Object({
+    path: Type.String({
+      minLength: 1,
+      description: "Workspace-relative file path (for example MEMORY.md or notes/today.md).",
+    }),
+    maxChars: Type.Optional(
+      Type.Number({
+        minimum: 100,
+        maximum: WEB_FETCH_MAX_CHARS_CAP,
+        description: "Maximum characters to return.",
+      }),
+    ),
+  }),
+};
+
+const WORKSPACE_WRITE_TOOL = {
+  name: WORKSPACE_WRITE_TOOL_NAME,
+  description:
+    "Create or update a UTF-8 text file inside the CodexClaw workspace. Path is always workspace-relative.",
+  parameters: Type.Object({
+    path: Type.String({
+      minLength: 1,
+      description: "Workspace-relative file path to create or update.",
+    }),
+    content: Type.String({
+      description: "Text content to write.",
+    }),
+    mode: Type.Optional(Type.Union([Type.Literal("overwrite"), Type.Literal("append")])),
+  }),
+};
+
+const WORKSPACE_DELETE_TOOL = {
+  name: WORKSPACE_DELETE_TOOL_NAME,
+  description:
+    "Delete a file or directory inside the CodexClaw workspace. Cannot delete outside workspace root.",
+  parameters: Type.Object({
+    path: Type.String({
+      minLength: 1,
+      description: "Workspace-relative target path.",
+    }),
+    recursive: Type.Optional(
+      Type.Boolean({
+        description: "Set true to delete non-empty directories.",
+      }),
+    ),
+  }),
 };
 
 function trim(value) {
   return String(value ?? "").trim();
+}
+
+function normalizeWorkspaceRelativePath(rawPath) {
+  const normalizedInput = trim(rawPath).replaceAll("\\", "/");
+  if (!normalizedInput) {
+    return "";
+  }
+  const normalized = path.posix.normalize(normalizedInput);
+  if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+    return "";
+  }
+  if (normalized.startsWith("/")) {
+    return "";
+  }
+  return normalized;
+}
+
+function resolveWorkspacePath(workspaceRoot, rawPath) {
+  const relativePath = normalizeWorkspaceRelativePath(rawPath);
+  if (!relativePath) {
+    return {
+      ok: false,
+      error: "Invalid workspace path. Use a workspace-relative path.",
+    };
+  }
+  const absolutePath = path.resolve(workspaceRoot, relativePath);
+  const escaped = path.relative(workspaceRoot, absolutePath).startsWith("..");
+  if (escaped) {
+    return {
+      ok: false,
+      error: "Path escapes workspace root.",
+    };
+  }
+  return {
+    ok: true,
+    relativePath,
+    absolutePath,
+  };
+}
+
+function resolveWorkspaceWriteMode(value) {
+  return trim(value).toLowerCase() === "append" ? "append" : "overwrite";
+}
+
+function resolveWorkspaceReadMaxChars(value) {
+  return resolveWebFetchMaxChars(value);
 }
 
 function normalizeCodexModelId(value) {
@@ -256,40 +353,30 @@ function resolveWebFetchSkillEnabled(skills) {
   return true;
 }
 
-function resolveSkillPath(skillKey) {
-  const skillDir = SKILL_DIR_BY_KEY[skillKey];
-  if (!skillDir) {
-    return "";
-  }
-  return fileURLToPath(new URL(`./skills/${skillDir}/SKILL.md`, import.meta.url));
-}
-
 function buildSkillsPrompt({ notionEnabled, webSearchEnabled, webFetchEnabled, webSearchApiKey }) {
-  const skills = [];
+  const skills = [
+    {
+      name: WORKSPACE_FILES_SKILL_KEY,
+      description: "Workspace file management for memory and instruction files.",
+    },
+  ];
   if (notionEnabled) {
     skills.push({
       name: NOTION_SKILL_KEY,
       description: "Notion API for creating and managing pages, databases, and blocks.",
-      location: resolveSkillPath(NOTION_SKILL_KEY),
     });
   }
   if (webSearchEnabled) {
     skills.push({
       name: WEB_SEARCH_SKILL_KEY,
       description: "Web search via Brave Search API.",
-      location: resolveSkillPath(WEB_SEARCH_SKILL_KEY),
     });
   }
   if (webFetchEnabled) {
     skills.push({
       name: WEB_FETCH_SKILL_KEY,
       description: "Fetch and extract readable content from web pages.",
-      location: resolveSkillPath(WEB_FETCH_SKILL_KEY),
     });
-  }
-
-  if (skills.length === 0) {
-    return "";
   }
 
   const lines = [
@@ -302,11 +389,16 @@ function buildSkillsPrompt({ notionEnabled, webSearchEnabled, webFetchEnabled, w
     lines.push("  <skill>");
     lines.push(`    <name>${skill.name}</name>`);
     lines.push(`    <description>${skill.description}</description>`);
-    lines.push(`    <location>${skill.location}</location>`);
     lines.push("  </skill>");
   }
 
   lines.push("</available_skills>");
+  lines.push(
+    "Skill details above are already summarized. Do not read SKILL.md files via workspace file tools.",
+  );
+  lines.push(
+    `For workspace file operations, use tools \`${WORKSPACE_READ_TOOL_NAME}\`, \`${WORKSPACE_WRITE_TOOL_NAME}\`, \`${WORKSPACE_DELETE_TOOL_NAME}\`.`,
+  );
 
   if (notionEnabled) {
     lines.push(`For Notion operations, use tool \`${NOTION_TOOL_NAME}\` instead of guessing API payloads.`);
@@ -331,14 +423,50 @@ function buildSkillsPrompt({ notionEnabled, webSearchEnabled, webFetchEnabled, w
   return lines.join("\n");
 }
 
-function buildSystemPrompt({ instructions, notionEnabled, webSearchEnabled, webFetchEnabled, webSearchApiKey }) {
+function buildWorkspacePrompt({ workspaceRoot, isFirstTurn }) {
+  const lines = [
+    "## Workspace",
+    `Workspace root: ${workspaceRoot}`,
+    `Memory file: ${WORKSPACE_MEMORY_FILE_NAME}`,
+    `Instruction file: ${WORKSPACE_INSTRUCTIONS_FILE_NAME}`,
+    "workspace_* tools are only for files under Workspace root.",
+    "Do not use workspace_* tools for repository source paths such as src/, skills/, bin/, docs/, README.md.",
+    "Never claim workspace file changes unless you actually executed workspace tools.",
+  ];
+  if (isFirstTurn) {
+    lines.push(
+      "First-turn rule: before final response, check MEMORY.md and INSTRUCTIONS.md in workspace.",
+    );
+    lines.push(
+      "On first turn, do not read any other workspace file unless the user explicitly asks for it.",
+    );
+    lines.push(
+      "If either file is missing, create it with workspace_write_file (empty content is allowed), then read both files.",
+    );
+  }
+  return lines.join("\n");
+}
+
+function buildSystemPrompt({
+  instructions,
+  notionEnabled,
+  webSearchEnabled,
+  webFetchEnabled,
+  webSearchApiKey,
+  workspaceRoot,
+  isFirstTurn,
+}) {
   const skillsPrompt = buildSkillsPrompt({
     notionEnabled,
     webSearchEnabled,
     webFetchEnabled,
     webSearchApiKey,
   });
-  return [instructions, skillsPrompt].filter(Boolean).join("\n\n");
+  const workspacePrompt = buildWorkspacePrompt({
+    workspaceRoot,
+    isFirstTurn,
+  });
+  return [instructions, workspacePrompt, skillsPrompt].filter(Boolean).join("\n\n");
 }
 
 function collectToolCalls(message, toolNames) {
@@ -750,10 +878,34 @@ function resolveToolTarget(toolName, args) {
       path: truncateToolPath(trim(args?.url)),
     };
   }
+  if (toolName === WORKSPACE_READ_TOOL_NAME) {
+    return {
+      method: "READ",
+      path: truncateToolPath(trim(args?.path)),
+    };
+  }
+  if (toolName === WORKSPACE_WRITE_TOOL_NAME) {
+    return {
+      method: resolveWorkspaceWriteMode(args?.mode).toUpperCase(),
+      path: truncateToolPath(trim(args?.path)),
+    };
+  }
+  if (toolName === WORKSPACE_DELETE_TOOL_NAME) {
+    return {
+      method: "DELETE",
+      path: truncateToolPath(trim(args?.path)),
+    };
+  }
   return {
     method: "",
     path: "",
   };
+}
+
+async function ensureWorkspaceScaffold(workspaceRoot) {
+  await ensureWorkspaceInitialized({
+    workspaceRoot,
+  });
 }
 
 function buildMissingBraveApiKeyPayload() {
@@ -1022,6 +1174,151 @@ async function executeWebFetchToolCall(params) {
   }
 }
 
+async function executeWorkspaceReadToolCall(params) {
+  const workspaceRoot = resolveWorkspaceRoot(params?.workspaceRoot);
+  const resolved = resolveWorkspacePath(workspaceRoot, params?.path);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      workspaceRoot,
+      error: resolved.error,
+    };
+  }
+
+  const maxChars = resolveWorkspaceReadMaxChars(params?.maxChars);
+  try {
+    const stat = await fs.stat(resolved.absolutePath);
+    if (!stat.isFile()) {
+      return {
+        ok: false,
+        workspaceRoot,
+        path: resolved.relativePath,
+        error: "Target is not a file.",
+      };
+    }
+    const content = await fs.readFile(resolved.absolutePath, "utf8");
+    const truncated = truncateText(content, maxChars);
+    return {
+      ok: true,
+      workspaceRoot,
+      path: resolved.relativePath,
+      truncated: truncated.truncated,
+      length: truncated.text.length,
+      text: truncated.text,
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        ok: false,
+        workspaceRoot,
+        path: resolved.relativePath,
+        error: "not_found",
+        retryable: false,
+        message:
+          "File not found in workspace root. Do not retry with repository skill paths (for example src/skills/.../SKILL.md).",
+      };
+    }
+    return {
+      ok: false,
+      workspaceRoot,
+      path: resolved.relativePath,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeWorkspaceWriteToolCall(params) {
+  const workspaceRoot = resolveWorkspaceRoot(params?.workspaceRoot);
+  const resolved = resolveWorkspacePath(workspaceRoot, params?.path);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      workspaceRoot,
+      error: resolved.error,
+    };
+  }
+
+  const content =
+    typeof params?.content === "string"
+      ? params.content
+      : params?.content === undefined || params?.content === null
+        ? ""
+        : String(params.content);
+  const mode = resolveWorkspaceWriteMode(params?.mode);
+
+  try {
+    await fs.mkdir(path.dirname(resolved.absolutePath), { recursive: true });
+    if (mode === "append") {
+      await fs.appendFile(resolved.absolutePath, content, "utf8");
+    } else {
+      await fs.writeFile(resolved.absolutePath, content, "utf8");
+    }
+    const stat = await fs.stat(resolved.absolutePath);
+    return {
+      ok: true,
+      workspaceRoot,
+      path: resolved.relativePath,
+      mode,
+      bytes: Number.isFinite(stat.size) ? stat.size : undefined,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      workspaceRoot,
+      path: resolved.relativePath,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeWorkspaceDeleteToolCall(params) {
+  const workspaceRoot = resolveWorkspaceRoot(params?.workspaceRoot);
+  const resolved = resolveWorkspacePath(workspaceRoot, params?.path);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      workspaceRoot,
+      error: resolved.error,
+    };
+  }
+
+  const recursive = Boolean(params?.recursive);
+  try {
+    const stat = await fs.stat(resolved.absolutePath);
+    if (stat.isDirectory() && !recursive) {
+      return {
+        ok: false,
+        workspaceRoot,
+        path: resolved.relativePath,
+        error: "Target is a directory. Set recursive=true to delete directories.",
+      };
+    }
+    await fs.rm(resolved.absolutePath, { recursive, force: false });
+    return {
+      ok: true,
+      workspaceRoot,
+      path: resolved.relativePath,
+      recursive,
+      deletedType: stat.isDirectory() ? "directory" : "file",
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        ok: false,
+        workspaceRoot,
+        path: resolved.relativePath,
+        error: "not_found",
+      };
+    }
+    return {
+      ok: false,
+      workspaceRoot,
+      path: resolved.relativePath,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
 function validateAssistantResponse(response) {
   if (!response || typeof response !== "object") {
     throw new Error("Codex API returned an invalid response.");
@@ -1053,6 +1350,8 @@ export async function requestCodexResponse(params) {
   const modelId = normalizeCodexModelId(params?.modelId);
   const message = trim(params?.message);
   const instructions = trim(params?.instructions) || DEFAULT_CODEX_INSTRUCTIONS;
+  const workspaceRoot = resolveWorkspaceRoot(params?.workspaceRoot);
+  const isFirstTurn = Boolean(params?.isFirstTurn);
 
   const notionApiKey = resolveNotionApiKey(params?.skills);
   const notionEnabled = Boolean(notionApiKey);
@@ -1075,12 +1374,20 @@ export async function requestCodexResponse(params) {
     throw new Error("Message is empty.");
   }
 
+  try {
+    await ensureWorkspaceScaffold(workspaceRoot);
+  } catch (error) {
+    throw new Error(`Workspace init failed: ${trim(error?.message) || String(error)}`);
+  }
+
   const systemPrompt = buildSystemPrompt({
     instructions,
     notionEnabled,
     webSearchEnabled,
     webFetchEnabled,
     webSearchApiKey,
+    workspaceRoot,
+    isFirstTurn,
   });
 
   const messages =
@@ -1096,6 +1403,30 @@ export async function requestCodexResponse(params) {
 
   const enabledTools = [];
   const toolHandlers = new Map();
+
+  enabledTools.push(WORKSPACE_READ_TOOL);
+  toolHandlers.set(WORKSPACE_READ_TOOL_NAME, async (rawArgs) =>
+    executeWorkspaceReadToolCall({
+      ...rawArgs,
+      workspaceRoot,
+    }),
+  );
+
+  enabledTools.push(WORKSPACE_WRITE_TOOL);
+  toolHandlers.set(WORKSPACE_WRITE_TOOL_NAME, async (rawArgs) =>
+    executeWorkspaceWriteToolCall({
+      ...rawArgs,
+      workspaceRoot,
+    }),
+  );
+
+  enabledTools.push(WORKSPACE_DELETE_TOOL);
+  toolHandlers.set(WORKSPACE_DELETE_TOOL_NAME, async (rawArgs) =>
+    executeWorkspaceDeleteToolCall({
+      ...rawArgs,
+      workspaceRoot,
+    }),
+  );
 
   if (notionEnabled) {
     enabledTools.push(NOTION_TOOL);

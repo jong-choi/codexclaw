@@ -36,3 +36,10 @@ export const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/se
 
 export const WEB_FETCH_SKILL_KEY = "web_fetch";
 export const WEB_FETCH_SKILL_DIR = "web-fetch";
+
+export const WORKSPACE_FILES_SKILL_KEY = "workspace_files";
+export const WORKSPACE_FILES_SKILL_DIR = "workspace-files";
+export const WORKSPACE_DEFAULT_ROOT_DIR = ".codexclaw/workspace";
+export const WORKSPACE_TEMPLATE_ROOT_DIR = ".codexclaw/initial-workspace";
+export const WORKSPACE_MEMORY_FILE_NAME = "MEMORY.md";
+export const WORKSPACE_INSTRUCTIONS_FILE_NAME = "INSTRUCTIONS.md";

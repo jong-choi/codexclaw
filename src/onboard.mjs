@@ -1,3 +1,4 @@
+import path from "node:path";
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
   BRAVE_API_ENV_NAME,
@@ -6,11 +7,13 @@ import {
   LEGACY_CODEX_MODEL_ID_ALIASES,
   NOTION_API_ENV_NAME,
   NOTION_SKILL_KEY,
+  WORKSPACE_DEFAULT_ROOT_DIR,
   WEB_FETCH_SKILL_KEY,
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
 import { loginCodexOAuth } from "./oauth.mjs";
 import { withPrompter } from "./prompt.mjs";
+import { ensureWorkspaceInitialized, inspectWorkspace, resolveWorkspaceRoot } from "./workspace.mjs";
 
 function trim(value) {
   return String(value ?? "").trim();
@@ -92,14 +95,27 @@ function resolveWebFetchSkillEnabled(config) {
   return resolveSkillEnabled(config, WEB_FETCH_SKILL_KEY);
 }
 
+function resolveConfiguredWorkspaceRoot(config) {
+  const fromConfig = trim(config?.workspace?.root);
+  if (fromConfig) {
+    return resolveWorkspaceRoot(fromConfig);
+  }
+  return path.resolve(process.cwd(), WORKSPACE_DEFAULT_ROOT_DIR);
+}
+
 export async function runOnboard(options = {}) {
   const loaded = await loadConfig(options.configPath);
   const existing = loaded.config ?? {};
+  const workspaceRoot = resolveConfiguredWorkspaceRoot(existing);
 
   const next = {
     ...existing,
     codex: { ...(existing.codex ?? {}) },
     telegram: { ...(existing.telegram ?? {}) },
+    workspace: {
+      ...(existing.workspace ?? {}),
+      root: workspaceRoot,
+    },
     skills: {
       ...(existing.skills ?? {}),
       entries: resolveSkillEntries(existing),
@@ -368,7 +384,22 @@ export async function runOnboard(options = {}) {
       }
     }
 
+    const workspaceState = await inspectWorkspace({
+      workspaceRoot: next.workspace?.root,
+    });
+    let resetWorkspaceFromTemplate = false;
+    if (workspaceState.populated) {
+      resetWorkspaceFromTemplate = await prompter.confirm({
+        message: `Existing workspace detected at ${workspaceState.workspaceRoot}. Initialize from template?`,
+        initialValue: false,
+      });
+    }
+
     const saved = await saveConfig(next, loaded.path);
+    const workspaceInit = await ensureWorkspaceInitialized({
+      workspaceRoot: saved.config?.workspace?.root,
+      forceReset: resetWorkspaceFromTemplate,
+    });
     const notionEnabled = resolveNotionSkillEnabled(saved.config);
     const webSearchEnabled = resolveWebSearchSkillEnabled(saved.config);
     const webSearchKeyConfigured = Boolean(resolveSkillApiKey(saved.config, WEB_SEARCH_SKILL_KEY));
@@ -390,6 +421,10 @@ export async function runOnboard(options = {}) {
             : `Web search auth source: missing (${BRAVE_API_ENV_NAME} not configured)`
           : "Web search auth source: not configured",
         `Web fetch skill: ${webFetchEnabled ? "enabled" : "disabled"}`,
+        `Workspace root: ${workspaceInit.workspaceRoot}`,
+        `Workspace template: ${workspaceInit.templateRoot}`,
+        `Workspace template copied: ${workspaceInit.seededFromTemplate ? "yes" : "no (already initialized)"}`,
+        `Workspace reset from template: ${workspaceInit.forceReset ? "yes" : "no"}`,
         "First DM the bot in Telegram to receive a pairing code.",
         "Approve by entering the pairing code in the running bot terminal.",
         "Press Enter on an empty line to ignore.",

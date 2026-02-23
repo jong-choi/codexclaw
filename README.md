@@ -7,6 +7,7 @@ Minimal onboarding + runtime for:
 3. Telegram bot bridge
 4. Optional Notion skill API key setup
 5. Optional web tools (`web_search`, `web_fetch`) setup
+6. Workspace file skill (`workspace_files`) for memory/instruction file management
 
 ## Install
 
@@ -41,11 +42,20 @@ Cleanup helper (interactive):
 ./scripts/uninstall.sh
 ```
 
+Workspace reset helper:
+
+```bash
+./scripts/reset-workspace.sh
+```
+
+This resets only the workspace directory and recreates `MEMORY.md` / `INSTRUCTIONS.md`.
+It removes the current workspace and copies from `.codexclaw/initial-workspace`, then ensures `MEMORY.md` and `INSTRUCTIONS.md`.
+
 The script checks existing resources first, then asks per item:
 - Running project containers → ask to run `docker compose down`
 - Project images → ask to delete images
 - Project volumes → ask to delete volumes
-- Docker build cache → ask to delete build cache
+- Workspace files (`.codexclaw/workspace`) → ask to initialize workspace files
 - Global config (`~/.codexclaw`) → ask to delete global config
 
 Notes:
@@ -81,6 +91,17 @@ Web tools (optional):
 - During onboarding, you can enable `web_search` and `web_fetch` skills.
 - `web_search` uses Brave Search API (`skills.entries.web_search.apiKey` or `BRAVE_API_KEY`).
 - `web_fetch` fetches and extracts readable page content (no API key required).
+
+Workspace files (always available):
+- CodexClaw exposes workspace tools: `workspace_read_file`, `workspace_write_file`, `workspace_delete_path`.
+- Default workspace root: `./.codexclaw/workspace` (relative to the runtime working directory).
+- Default workspace template: `./.codexclaw/initial-workspace`.
+- `.codexclaw/workspace` is gitignored by default.
+- Optional override: set `workspace.root` in config.
+- During onboarding, if workspace is empty, template files are copied into workspace.
+- During onboarding, if workspace already exists and is not empty, it asks whether to reset from template.
+- On each session's first turn, system prompt instructs Codex to check `MEMORY.md` and `INSTRUCTIONS.md`.
+- Missing files are auto-created during runtime initialization.
 
 ## Run Telegram bot
 
