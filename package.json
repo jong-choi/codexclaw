@@ -1,0 +1,21 @@
+{
+  "name": "codexclaw",
+  "version": "0.1.0",
+  "description": "Minimal Codex + Telegram onboarding CLI",
+  "type": "module",
+  "bin": {
+    "codexclaw": "./bin/codexclaw.mjs",
+    "tele-codex": "./bin/codexclaw.mjs"
+  },
+  "scripts": {
+    "onboard": "node ./bin/codexclaw.mjs onboard",
+    "telegram": "node ./bin/codexclaw.mjs telegram run",
+    "config": "node ./bin/codexclaw.mjs config show"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "0.54.1"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
