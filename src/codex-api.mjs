@@ -11,12 +11,20 @@ import {
   NOTION_API_ENV_NAME,
   NOTION_API_VERSION,
   NOTION_SKILL_KEY,
+  SCHEDULER_DEFAULT_TIMEZONE,
+  SCHEDULER_SKILL_KEY,
   WORKSPACE_FILES_SKILL_KEY,
   WORKSPACE_INSTRUCTIONS_FILE_NAME,
   WORKSPACE_MEMORY_FILE_NAME,
   WEB_FETCH_SKILL_KEY,
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
+import {
+  cancelScheduledJob,
+  createScheduledJob,
+  listScheduledJobs,
+  resolveSchedulerTimezone,
+} from "./schedule-store.mjs";
 import { ensureWorkspaceInitialized, resolveWorkspaceRoot } from "./workspace.mjs";
 
 const DEFAULT_CODEX_INSTRUCTIONS =
@@ -32,6 +40,9 @@ const WEB_FETCH_TOOL_NAME = "web_fetch";
 const WORKSPACE_READ_TOOL_NAME = "workspace_read_file";
 const WORKSPACE_WRITE_TOOL_NAME = "workspace_write_file";
 const WORKSPACE_DELETE_TOOL_NAME = "workspace_delete_path";
+const SCHEDULE_CREATE_TOOL_NAME = "schedule_create";
+const SCHEDULE_LIST_TOOL_NAME = "schedule_list";
+const SCHEDULE_DELETE_TOOL_NAME = "schedule_delete";
 
 const WEB_SEARCH_DEFAULT_COUNT = 5;
 const WEB_SEARCH_MAX_COUNT = 10;
@@ -163,6 +174,76 @@ const WORKSPACE_DELETE_TOOL = {
         description: "Set true to delete non-empty directories.",
       }),
     ),
+  }),
+};
+
+const SCHEDULE_CREATE_TOOL = {
+  name: SCHEDULE_CREATE_TOOL_NAME,
+  description:
+    "Create a one-time scheduled task for the current Telegram chat. The stored prompt will be sent back into Codex at run time.",
+  parameters: Type.Object({
+    prompt: Type.String({
+      minLength: 1,
+      description: "Prompt to run when the schedule fires.",
+    }),
+    delaySeconds: Type.Optional(
+      Type.Number({
+        minimum: 1,
+        description: "Relative delay in seconds (use this for requests like 'in 3 minutes').",
+      }),
+    ),
+    runAt: Type.Optional(
+      Type.String({
+        description:
+          "Absolute schedule time. Use ISO 8601 with offset (recommended), or YYYY-MM-DDTHH:mm[:ss] with timezone.",
+      }),
+    ),
+    timezone: Type.Optional(
+      Type.String({
+        description:
+          "IANA timezone for local runAt without offset, e.g. Asia/Seoul, Europe/London, America/New_York.",
+      }),
+    ),
+  }),
+};
+
+const SCHEDULE_LIST_TOOL = {
+  name: SCHEDULE_LIST_TOOL_NAME,
+  description: "List scheduled tasks for the current Telegram chat.",
+  parameters: Type.Object({
+    status: Type.Optional(
+      Type.Union([
+        Type.Literal("pending"),
+        Type.Literal("running"),
+        Type.Literal("completed"),
+        Type.Literal("failed"),
+        Type.Literal("canceled"),
+        Type.Literal("all"),
+      ]),
+    ),
+    limit: Type.Optional(
+      Type.Number({
+        minimum: 1,
+        maximum: 50,
+        description: "Maximum number of items to return.",
+      }),
+    ),
+    timezone: Type.Optional(
+      Type.String({
+        description: "Display timezone for returned local times (IANA).",
+      }),
+    ),
+  }),
+};
+
+const SCHEDULE_DELETE_TOOL = {
+  name: SCHEDULE_DELETE_TOOL_NAME,
+  description: "Cancel one scheduled task by job id for the current Telegram chat.",
+  parameters: Type.Object({
+    jobId: Type.String({
+      minLength: 1,
+      description: "Scheduled job id from schedule_list.",
+    }),
   }),
 };
 
@@ -353,7 +434,30 @@ function resolveWebFetchSkillEnabled(skills) {
   return true;
 }
 
-function buildSkillsPrompt({ notionEnabled, webSearchEnabled, webFetchEnabled, webSearchApiKey }) {
+function resolveSchedulerSkillEnabled(skills) {
+  const entry = resolveSkillEntry(skills, SCHEDULER_SKILL_KEY);
+  if (!entry) {
+    return false;
+  }
+  if (typeof entry.enabled === "boolean") {
+    return entry.enabled;
+  }
+  return true;
+}
+
+function resolveSchedulerDefaultTimezone(skills) {
+  const timezone = trim(skills?.entries?.[SCHEDULER_SKILL_KEY]?.timezone);
+  return resolveSchedulerTimezone(timezone, SCHEDULER_DEFAULT_TIMEZONE);
+}
+
+function buildSkillsPrompt({
+  notionEnabled,
+  webSearchEnabled,
+  webFetchEnabled,
+  webSearchApiKey,
+  schedulerEnabled,
+  schedulerTimezone,
+}) {
   const skills = [
     {
       name: WORKSPACE_FILES_SKILL_KEY,
@@ -376,6 +480,12 @@ function buildSkillsPrompt({ notionEnabled, webSearchEnabled, webFetchEnabled, w
     skills.push({
       name: WEB_FETCH_SKILL_KEY,
       description: "Fetch and extract readable content from web pages.",
+    });
+  }
+  if (schedulerEnabled) {
+    skills.push({
+      name: SCHEDULER_SKILL_KEY,
+      description: "Schedule delayed/absolute follow-up tasks for the current Telegram chat.",
     });
   }
 
@@ -419,6 +529,17 @@ function buildSkillsPrompt({ notionEnabled, webSearchEnabled, webFetchEnabled, w
   if (webFetchEnabled) {
     lines.push(`For direct page retrieval, use tool \`${WEB_FETCH_TOOL_NAME}\`.`);
   }
+  if (schedulerEnabled) {
+    lines.push(
+      `For reminders/scheduling, use tools \`${SCHEDULE_CREATE_TOOL_NAME}\`, \`${SCHEDULE_LIST_TOOL_NAME}\`, \`${SCHEDULE_DELETE_TOOL_NAME}\`.`,
+    );
+    lines.push(
+      `Default scheduler timezone is ${schedulerTimezone}. For relative requests (e.g. "in 3 minutes"), prefer delaySeconds.`,
+    );
+    lines.push(
+      "For absolute local times, provide runAt plus timezone (IANA) unless runAt already includes timezone offset.",
+    );
+  }
 
   return lines.join("\n");
 }
@@ -453,6 +574,8 @@ function buildSystemPrompt({
   webSearchEnabled,
   webFetchEnabled,
   webSearchApiKey,
+  schedulerEnabled,
+  schedulerTimezone,
   workspaceRoot,
   isFirstTurn,
 }) {
@@ -461,6 +584,8 @@ function buildSystemPrompt({
     webSearchEnabled,
     webFetchEnabled,
     webSearchApiKey,
+    schedulerEnabled,
+    schedulerTimezone,
   });
   const workspacePrompt = buildWorkspacePrompt({
     workspaceRoot,
@@ -896,6 +1021,24 @@ function resolveToolTarget(toolName, args) {
       path: truncateToolPath(trim(args?.path)),
     };
   }
+  if (toolName === SCHEDULE_CREATE_TOOL_NAME) {
+    return {
+      method: "CREATE",
+      path: truncateToolPath(trim(args?.runAt) || `${Math.floor(Number(args?.delaySeconds) || 0)}s`),
+    };
+  }
+  if (toolName === SCHEDULE_LIST_TOOL_NAME) {
+    return {
+      method: "LIST",
+      path: truncateToolPath(trim(args?.status) || "pending"),
+    };
+  }
+  if (toolName === SCHEDULE_DELETE_TOOL_NAME) {
+    return {
+      method: "DELETE",
+      path: truncateToolPath(trim(args?.jobId)),
+    };
+  }
   return {
     method: "",
     path: "",
@@ -1319,6 +1462,106 @@ async function executeWorkspaceDeleteToolCall(params) {
   }
 }
 
+function resolveRuntimeScheduleContext(params) {
+  const channel = trim(params?.runtime?.channel).toLowerCase();
+  const chatId = trim(params?.runtime?.chatId);
+  const sessionId = trim(params?.runtime?.sessionId);
+  if (!channel || !chatId || !sessionId) {
+    return {
+      ok: false,
+      error: "Schedule tools need runtime context (channel/chat/session).",
+    };
+  }
+  return {
+    ok: true,
+    channel,
+    chatId,
+    sessionId,
+  };
+}
+
+async function executeScheduleCreateToolCall(params) {
+  const runtime = resolveRuntimeScheduleContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  try {
+    return await createScheduledJob({
+      customConfigPath: params?.configPath,
+      channel: runtime.channel,
+      chatId: runtime.chatId,
+      sessionId: runtime.sessionId,
+      prompt: params?.prompt,
+      delaySeconds: params?.delaySeconds,
+      runAt: params?.runAt,
+      timezone: params?.timezone,
+      defaultTimezone: params?.defaultTimezone,
+      displayTimezone: params?.displayTimezone,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeScheduleListToolCall(params) {
+  const runtime = resolveRuntimeScheduleContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  try {
+    return await listScheduledJobs({
+      customConfigPath: params?.configPath,
+      channel: runtime.channel,
+      chatId: runtime.chatId,
+      status: params?.status,
+      limit: params?.limit,
+      defaultTimezone: params?.defaultTimezone,
+      displayTimezone: params?.timezone,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeScheduleDeleteToolCall(params) {
+  const runtime = resolveRuntimeScheduleContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  try {
+    return await cancelScheduledJob({
+      customConfigPath: params?.configPath,
+      channel: runtime.channel,
+      chatId: runtime.chatId,
+      jobId: params?.jobId,
+      displayTimezone: params?.defaultTimezone,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
 function validateAssistantResponse(response) {
   if (!response || typeof response !== "object") {
     throw new Error("Codex API returned an invalid response.");
@@ -1360,6 +1603,13 @@ export async function requestCodexResponse(params) {
   const webSearchApiKey = resolveWebSearchApiKey(params?.skills);
 
   const webFetchEnabled = resolveWebFetchSkillEnabled(params?.skills);
+  const schedulerEnabled = resolveSchedulerSkillEnabled(params?.skills);
+  const schedulerTimezone = resolveSchedulerDefaultTimezone(params?.skills);
+  const runtimeChannel = trim(params?.runtime?.channel).toLowerCase();
+  const runtimeChatId = trim(params?.runtime?.chatId);
+  const runtimeSessionId = trim(params?.runtime?.sessionId);
+  const schedulerRuntimeEnabled =
+    schedulerEnabled && Boolean(runtimeChannel && runtimeChatId && runtimeSessionId);
 
   const model = resolveCodexModel(modelId);
   const history = normalizeConversationMessages(params?.messages, model);
@@ -1386,6 +1636,8 @@ export async function requestCodexResponse(params) {
     webSearchEnabled,
     webFetchEnabled,
     webSearchApiKey,
+    schedulerEnabled: schedulerRuntimeEnabled,
+    schedulerTimezone,
     workspaceRoot,
     isFirstTurn,
   });
@@ -1451,6 +1703,51 @@ export async function requestCodexResponse(params) {
   if (webFetchEnabled) {
     enabledTools.push(WEB_FETCH_TOOL);
     toolHandlers.set(WEB_FETCH_TOOL_NAME, async (rawArgs) => executeWebFetchToolCall(rawArgs));
+  }
+
+  if (schedulerRuntimeEnabled) {
+    enabledTools.push(SCHEDULE_CREATE_TOOL);
+    toolHandlers.set(SCHEDULE_CREATE_TOOL_NAME, async (rawArgs) =>
+      executeScheduleCreateToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+        defaultTimezone: schedulerTimezone,
+        displayTimezone: schedulerTimezone,
+      }),
+    );
+
+    enabledTools.push(SCHEDULE_LIST_TOOL);
+    toolHandlers.set(SCHEDULE_LIST_TOOL_NAME, async (rawArgs) =>
+      executeScheduleListToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+        defaultTimezone: schedulerTimezone,
+      }),
+    );
+
+    enabledTools.push(SCHEDULE_DELETE_TOOL);
+    toolHandlers.set(SCHEDULE_DELETE_TOOL_NAME, async (rawArgs) =>
+      executeScheduleDeleteToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+        defaultTimezone: schedulerTimezone,
+      }),
+    );
   }
 
   const enabledToolNames = Array.from(toolHandlers.keys());

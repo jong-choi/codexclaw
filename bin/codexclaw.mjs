@@ -16,7 +16,7 @@ function printHelp() {
       "  tele-codex config show [--config <path>]",
       "",
       "Notes:",
-      "  - onboard: OAuth + model select + telegram setup + optional Notion/web skill setup",
+      "  - onboard: OAuth + model select + telegram setup + optional Notion/web/scheduler skill setup",
       "  - telegram run: start long-polling bot",
       "  - in Telegram: /new resets context, /context shows stored context size",
       "  - in bot terminal: bye or exit stops telegram run (/bye, /exit also work)",

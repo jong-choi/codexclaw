@@ -16,6 +16,12 @@ import {
   readChannelAllowFromStore,
   upsertChannelPairingRequest,
 } from "./pairing-store.mjs";
+import {
+  claimDueScheduledJobs,
+  markScheduledJobCompleted,
+  markScheduledJobFailed,
+  resolveSecondsUntilNextScheduledJob,
+} from "./schedule-store.mjs";
 
 function trim(value) {
   return String(value ?? "").trim();
@@ -249,12 +255,15 @@ function startTypingHeartbeat(token, chatId, intervalMs = 4_500) {
   return () => clearInterval(timer);
 }
 
-async function getUpdates(token, offset, signal) {
+async function getUpdates(token, offset, signal, timeoutSeconds = 30) {
+  const timeout = Number.isFinite(Number(timeoutSeconds))
+    ? Math.max(1, Math.min(30, Math.floor(Number(timeoutSeconds))))
+    : 30;
   return await telegramApi(
     token,
     "getUpdates",
     {
-      timeout: 30,
+      timeout,
       offset,
       allowed_updates: ["message"],
     },
@@ -459,6 +468,119 @@ function formatErrorAsJson(error) {
   return JSON.stringify(payload);
 }
 
+function buildScheduledTriggerPrompt(job) {
+  return [
+    "[Scheduled task trigger]",
+    `scheduled_at_utc: ${trim(job?.runAt)}`,
+    `current_utc: ${new Date().toISOString()}`,
+    `instruction: ${trim(job?.prompt)}`,
+    "Generate the message to send now.",
+  ].join("\n");
+}
+
+async function runDueScheduledJobs(params) {
+  let oauth = params?.oauth;
+  let conversationStore = params?.conversationStore;
+  let conversationStoreDirty = false;
+
+  const dueJobs = await claimDueScheduledJobs({
+    customConfigPath: params?.configPath,
+    channel: "telegram",
+    limit: 3,
+  });
+  if (!Array.isArray(dueJobs) || dueJobs.length === 0) {
+    return {
+      oauth,
+      conversationStore,
+      conversationStoreDirty,
+    };
+  }
+
+  process.stdout.write(`Running ${dueJobs.length} scheduled task(s).\n`);
+
+  for (const job of dueJobs) {
+    const chatId = trim(job?.chatId);
+    const sessionId = trim(job?.sessionId);
+    const scheduledPrompt = buildScheduledTriggerPrompt(job);
+    if (!chatId || !sessionId || !scheduledPrompt) {
+      await markScheduledJobFailed({
+        customConfigPath: params?.configPath,
+        jobId: job?.id,
+        error: "Invalid scheduled job payload.",
+      });
+      continue;
+    }
+
+    try {
+      await sendTyping(params?.botToken, chatId).catch(() => {});
+      const fresh = await resolveFreshCodexAccessToken(oauth);
+      oauth = fresh.credentials;
+
+      if (fresh.changed) {
+        params.config.codex = {
+          ...params.config.codex,
+          oauth,
+        };
+        await saveConfig(params.config, params.configPath);
+      }
+
+      const now = Date.now();
+      const history = getConversationHistory(conversationStore, sessionId);
+      const response = await requestCodexResponse({
+        accessToken: fresh.accessToken,
+        modelId: params?.modelId,
+        instructions: params?.codexInstructions,
+        workspaceRoot: trim(params?.config?.workspace?.root),
+        isFirstTurn: false,
+        messages: [
+          ...history,
+          {
+            role: "user",
+            content: scheduledPrompt,
+            timestamp: now,
+          },
+        ],
+        skills: params?.config?.skills,
+        runtime: {
+          channel: "telegram",
+          chatId,
+          sessionId,
+        },
+        configPath: params?.configPath,
+      });
+
+      await sendMessage(params?.botToken, chatId, response.text);
+      conversationStore = appendConversationTurn({
+        store: conversationStore,
+        sessionId,
+        userText: `[scheduled] ${trim(job?.prompt)}`,
+        assistantText: response.text,
+      });
+      conversationStoreDirty = true;
+
+      await markScheduledJobCompleted({
+        customConfigPath: params?.configPath,
+        jobId: job?.id,
+      });
+    } catch (error) {
+      await markScheduledJobFailed({
+        customConfigPath: params?.configPath,
+        jobId: job?.id,
+        error: trim(error?.message) || String(error),
+      });
+      process.stderr.write(
+        `Scheduled task failed (${trim(job?.id)}): ${trim(error?.message) || String(error)}\n`,
+      );
+    }
+  }
+
+  return {
+    oauth,
+    conversationStore,
+    conversationStoreDirty,
+  };
+}
+
 export async function runTelegramBot(options = {}) {
   const loaded = await loadConfig(options.configPath);
   const configPath = loaded.path;
@@ -522,8 +644,36 @@ export async function runTelegramBot(options = {}) {
   while (!shouldStop) {
     try {
       let conversationStoreDirty = false;
+      const scheduledRun = await runDueScheduledJobs({
+        botToken,
+        modelId,
+        codexInstructions,
+        config,
+        configPath,
+        oauth,
+        conversationStore,
+      });
+      oauth = scheduledRun.oauth;
+      conversationStore = scheduledRun.conversationStore;
+      if (scheduledRun.conversationStoreDirty) {
+        const savedConversations = await saveConversationStore(conversationStore, configPath);
+        conversationStore = savedConversations.store;
+      }
+
+      const pollingTimeoutSeconds =
+        (await resolveSecondsUntilNextScheduledJob({
+          customConfigPath: configPath,
+          channel: "telegram",
+          maxSeconds: 30,
+        })) ?? 30;
+
       pollingAbortController = new AbortController();
-      const updates = await getUpdates(botToken, offset, pollingAbortController.signal);
+      const updates = await getUpdates(
+        botToken,
+        offset,
+        pollingAbortController.signal,
+        pollingTimeoutSeconds,
+      );
       pollingAbortController = null;
       for (const update of updates) {
         if (shouldStop) {
@@ -697,6 +847,12 @@ export async function runTelegramBot(options = {}) {
               },
             ],
             skills: config?.skills,
+            runtime: {
+              channel: "telegram",
+              chatId,
+              sessionId,
+            },
+            configPath,
             onToolEvent: async (event) => {
               if (event?.phase === "start" || event?.phase === "result") {
                 lastToolStatusAt = Date.now();

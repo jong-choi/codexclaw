@@ -12,7 +12,8 @@ Minimal onboarding + runtime for:
 3. Telegram bot bridge
 4. Optional Notion skill API key setup
 5. Optional web tools (`web_search`, `web_fetch`) setup
-6. Workspace file skill (`workspace_files`) for memory/instruction file management
+6. Optional scheduler tools (`schedule_create`, `schedule_list`, `schedule_delete`) setup
+7. Workspace file skill (`workspace_files`) for memory/instruction file management
 
 ## Install
 
@@ -129,6 +130,14 @@ Web tools (optional):
 - `web_search` uses Brave Search API (`skills.entries.web_search.apiKey` or `BRAVE_API_KEY`).
 - `web_fetch` fetches and extracts readable page content (no API key required).
 
+Scheduler (optional):
+- During onboarding, you can enable `scheduler` skill.
+- Default timezone is stored at `skills.entries.scheduler.timezone` (IANA, e.g. `Asia/Seoul`).
+- `schedule_create`: delay-based or absolute time scheduling
+- `schedule_list`: inspect current registered jobs
+- `schedule_delete`: cancel one job
+- Scheduled tasks are chat-scoped and trigger a new Codex run when due.
+
 Workspace files (always available):
 - CodexClaw exposes workspace tools: `workspace_read_file`, `workspace_write_file`, `workspace_delete_path`.
 - Default workspace root: `./.codexclaw/workspace` (relative to the runtime working directory).
@@ -151,6 +160,7 @@ Runtime behavior:
 - `/new`, `/clear`, `/reset`: clear saved context for the current chat.
 - `/context`: show the number of stored context messages.
 - Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
+- Due scheduled jobs are executed in the same bot process without new incoming messages.
 - The bot proactively posts a status message immediately after receiving a request.
 - While processing, it updates status periodically and during skill/tool calls.
 - It posts final completion/failure status, plus a skill execution log when tools were used.

@@ -37,6 +37,10 @@ export const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/se
 export const WEB_FETCH_SKILL_KEY = "web_fetch";
 export const WEB_FETCH_SKILL_DIR = "web-fetch";
 
+export const SCHEDULER_SKILL_KEY = "scheduler";
+export const SCHEDULER_SKILL_DIR = "scheduler";
+export const SCHEDULER_DEFAULT_TIMEZONE = "UTC";
+
 export const WORKSPACE_FILES_SKILL_KEY = "workspace_files";
 export const WORKSPACE_FILES_SKILL_DIR = "workspace-files";
 export const WORKSPACE_DEFAULT_ROOT_DIR = ".codexclaw/workspace";
