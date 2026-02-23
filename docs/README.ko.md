@@ -194,11 +194,14 @@ npm run telegram
 
 런타임 동작:
 - 채팅/세션별 멀티턴 컨텍스트 유지
+- `/help` (`/commands`도 가능): 커맨드 목록과 사용 예시 출력
 - `/new`, `/clear`, `/reset`: 현재 채팅의 저장된 컨텍스트 초기화
 - `/context`: 저장된 컨텍스트 메시지 수 확인
 - `/usage`: Codex 사용량(요청/토큰/비용) 전체/현재 채팅 통계 확인
+- `/think`, `/thinking`, `/reasoning`: 리즈닝 에포트 조회/변경(`none|minimal|low|medium|high|xhigh`)
 - `/models`: 사용 가능한 Codex 모델 목록 확인
-- `/model`: 현재 모델 확인, `/model <id|번호>`로 즉시 모델 변경
+- `/model`: 현재 모델 + 리즈닝 에포트 + 사용량 요약 확인, `/model <id|번호>`로 즉시 모델 변경
+- 잘못된 커맨드/인자 입력 시: 올바른 사용법과 `/help` 안내를 반환
 - 터미널 입력 `bye` 또는 `exit`: `telegram run` 즉시 종료(`\`/bye\``, `\`/exit\``도 동작)
 - Telegram 명령어 메뉴(`/`)는 시작 시 자동 동기화됩니다.
 - 현재 UTC/로컬 시간 컨텍스트가 모든 Codex 요청에 주입됩니다.

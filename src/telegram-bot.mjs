@@ -48,12 +48,15 @@ const MAX_STATUS_TEXT_CHARS = 3900;
 const PROACTIVE_STATUS_INTERVAL_MS = 10_000;
 const PROACTIVE_STATUS_QUIET_AFTER_TOOL_MS = 8_000;
 const TELEGRAM_USAGE_VERSION = 1;
+const REASONING_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
 const TELEGRAM_BOT_COMMANDS = [
   { command: "start", description: "Show quick help" },
+  { command: "help", description: "Show available commands" },
   { command: "new", description: "Reset context for this chat" },
   { command: "context", description: "Show stored context message count" },
   { command: "usage", description: "Show Codex usage (requests/tokens/cost)" },
+  { command: "think", description: "Show or set reasoning effort" },
   { command: "models", description: "List available Codex models" },
   { command: "model", description: "Show or switch model (/model <id|number>)" },
 ];
@@ -319,6 +322,29 @@ function resolveModelRef(modelId) {
   return `${CODEX_PROVIDER_ID}/${trim(modelId)}`;
 }
 
+function normalizeReasoningEffort(value) {
+  const raw = trim(value).toLowerCase();
+  if (!raw) {
+    return "";
+  }
+  if (raw === "off") {
+    return "none";
+  }
+  const collapsed = raw.replaceAll("_", "").replaceAll("-", "").replaceAll(" ", "");
+  if (collapsed === "xhigh" || collapsed === "extrahigh") {
+    return "xhigh";
+  }
+  return raw;
+}
+
+function resolveReasoningEffort(config) {
+  const normalized = normalizeReasoningEffort(config?.codex?.reasoningEffort);
+  if (REASONING_EFFORT_LEVELS.includes(normalized)) {
+    return normalized;
+  }
+  return "none";
+}
+
 function asFiniteNumber(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -451,13 +477,8 @@ function applyUsageSnapshotToConfig(config, chatId, rawUsage) {
   };
 }
 
-function buildUsageReport(config, chatId) {
-  const usageState = normalizeUsageState(config?.telegram?.usage);
-  const total = usageState.total;
-  const chat = normalizeUsageBucket(usageState.chats?.[trim(chatId)]);
-  const lines = [
-    "Codex usage",
-    "",
+function buildUsageSummaryLines(total, chat) {
+  return [
     "Total:",
     `- requests: ${formatInteger(total.requests)}`,
     `- tokens: ${formatInteger(total.totalTokens)} (in ${formatInteger(total.inputTokens)}, out ${formatInteger(total.outputTokens)}, cache read ${formatInteger(total.cacheReadTokens)}, cache write ${formatInteger(total.cacheWriteTokens)})`,
@@ -468,10 +489,34 @@ function buildUsageReport(config, chatId) {
     `- tokens: ${formatInteger(chat.totalTokens)} (in ${formatInteger(chat.inputTokens)}, out ${formatInteger(chat.outputTokens)}, cache read ${formatInteger(chat.cacheReadTokens)}, cache write ${formatInteger(chat.cacheWriteTokens)})`,
     `- cost: $${formatUsd(chat.costTotal)} (in $${formatUsd(chat.costInput)}, out $${formatUsd(chat.costOutput)}, cache read $${formatUsd(chat.costCacheRead)}, cache write $${formatUsd(chat.costCacheWrite)})`,
   ];
+}
+
+function buildUsageReport(config, chatId) {
+  const usageState = normalizeUsageState(config?.telegram?.usage);
+  const total = usageState.total;
+  const chat = normalizeUsageBucket(usageState.chats?.[trim(chatId)]);
+  const lines = ["Codex usage", "", ...buildUsageSummaryLines(total, chat)];
   if (trim(total.updatedAt)) {
     lines.push("", `Last updated: ${trim(total.updatedAt)}`);
   }
   return lines.join("\n");
+}
+
+function buildModelStatusMessage(config, chatId, modelId) {
+  const usageState = normalizeUsageState(config?.telegram?.usage);
+  const total = usageState.total;
+  const chat = normalizeUsageBucket(usageState.chats?.[trim(chatId)]);
+  const reasoningEffort = resolveReasoningEffort(config);
+  return [
+    `Current model: ${resolveModelRef(modelId)}`,
+    `Reasoning effort: ${reasoningEffort}`,
+    "",
+    "Usage summary:",
+    ...buildUsageSummaryLines(total, chat),
+    "",
+    "Change model with /model <id|number>.",
+    "Change reasoning with /think <none|minimal|low|medium|high|xhigh>.",
+  ].join("\n");
 }
 
 function buildModelListMessage(currentModelId) {
@@ -533,6 +578,58 @@ function resolveCommandArgs(text) {
 
 function isResetCommand(token) {
   return token === "/new" || token === "/clear" || token === "/reset";
+}
+
+function isHelpCommand(token) {
+  return token === "/help" || token === "/commands";
+}
+
+function isReasoningCommand(token) {
+  return (
+    token === "/think" ||
+    token === "/thinking" ||
+    token === "/t" ||
+    token === "/reasoning" ||
+    token === "/reason"
+  );
+}
+
+function isKnownChatCommand(token) {
+  return (
+    token === "/start" ||
+    isHelpCommand(token) ||
+    isResetCommand(token) ||
+    token === "/context" ||
+    token === "/usage" ||
+    isReasoningCommand(token) ||
+    token === "/models" ||
+    token === "/model"
+  );
+}
+
+function buildHelpMessage() {
+  return [
+    "CodexClaw Telegram commands",
+    "",
+    "/help - Show this command guide.",
+    "/new (/clear, /reset) - Reset context for this chat.",
+    "/context - Show stored context message count.",
+    "/usage - Show Codex usage (requests/tokens/cost).",
+    "/think <level> - Set reasoning effort.",
+    "/models - List available models.",
+    "/model - Show current model + reasoning + usage summary.",
+    "/model <id|number> - Switch model immediately.",
+    "",
+    `Reasoning levels: ${REASONING_EFFORT_LEVELS.join(", ")}`,
+    "Think aliases: /thinking, /reasoning, /reason, /t",
+    "",
+    "Examples:",
+    "/think medium",
+    "/model 3",
+    "/model gpt-5.3-codex",
+    "",
+    "If a command fails, run /help and follow the exact format above.",
+  ].join("\n");
 }
 
 function resolveConversationSessionId(message) {
@@ -757,6 +854,7 @@ async function runDueScheduledJobs(params) {
       const response = await requestCodexResponse({
         accessToken: fresh.accessToken,
         modelId: params?.modelId,
+        reasoningEffort: resolveReasoningEffort(params?.config),
         instructions: params?.codexInstructions,
         workspaceRoot: trim(params?.config?.workspace?.root),
         isFirstTurn: false,
@@ -990,12 +1088,19 @@ export async function runTelegramBot(options = {}) {
             chatId,
             [
               "CodexClaw is connected. Send a message to talk to Codex.",
+              "Use /help to see all available commands.",
               "Use /new to reset context for this chat.",
               "Use /context to inspect stored context size.",
               "Use /usage to inspect Codex usage.",
+              "Use /think to inspect or set reasoning effort.",
               "Use /models to list models, /model to inspect current model.",
             ].join("\n"),
           );
+          continue;
+        }
+
+        if (isHelpCommand(command)) {
+          await sendMessage(botToken, chatId, buildHelpMessage());
           continue;
         }
 
@@ -1007,6 +1112,19 @@ export async function runTelegramBot(options = {}) {
         }
 
         if (command === "/context") {
+          const arg = resolveCommandArgs(text);
+          if (arg) {
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                `Invalid usage: /context ${arg}`,
+                "Usage: /context",
+                "Tip: run /help to see all commands.",
+              ].join("\n"),
+            );
+            continue;
+          }
           const count = countConversationMessages(conversationStore, sessionId);
           await sendMessage(
             botToken,
@@ -1017,11 +1135,72 @@ export async function runTelegramBot(options = {}) {
         }
 
         if (command === "/usage") {
+          const arg = resolveCommandArgs(text);
+          if (arg) {
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                `Invalid usage: /usage ${arg}`,
+                "Usage: /usage",
+                "Tip: run /help to see all commands.",
+              ].join("\n"),
+            );
+            continue;
+          }
           await sendMessage(botToken, chatId, buildUsageReport(config, chatId));
           continue;
         }
 
+        if (isReasoningCommand(command)) {
+          const arg = resolveCommandArgs(text);
+          if (!arg) {
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                `Current reasoning effort: ${resolveReasoningEffort(config)}`,
+                `Options: ${REASONING_EFFORT_LEVELS.join(", ")}`,
+                "Set with /think <level>.",
+              ].join("\n"),
+            );
+            continue;
+          }
+          const nextEffort = normalizeReasoningEffort(arg);
+          if (!REASONING_EFFORT_LEVELS.includes(nextEffort)) {
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                `Invalid reasoning effort: ${trim(arg)}`,
+                `Options: ${REASONING_EFFORT_LEVELS.join(", ")}`,
+              ].join("\n"),
+            );
+            continue;
+          }
+          config.codex = {
+            ...(config.codex ?? {}),
+            reasoningEffort: nextEffort,
+          };
+          await saveConfig(config, configPath);
+          await sendMessage(botToken, chatId, `Reasoning effort set to ${nextEffort}.`);
+          continue;
+        }
+
         if (command === "/models") {
+          const arg = resolveCommandArgs(text);
+          if (arg) {
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                `Invalid usage: /models ${arg}`,
+                "Usage: /models",
+                "Tip: run /help to see all commands.",
+              ].join("\n"),
+            );
+            continue;
+          }
           await sendMessage(botToken, chatId, buildModelListMessage(activeModelId));
           continue;
         }
@@ -1029,15 +1208,7 @@ export async function runTelegramBot(options = {}) {
         if (command === "/model") {
           const arg = resolveCommandArgs(text);
           if (!arg) {
-            await sendMessage(
-              botToken,
-              chatId,
-              [
-                `Current model: ${resolveModelRef(activeModelId)}`,
-                "Change model with /model <id|number>.",
-                "Examples: /model 3, /model gpt-5.3-codex",
-              ].join("\n"),
-            );
+            await sendMessage(botToken, chatId, buildModelStatusMessage(config, chatId, activeModelId));
             continue;
           }
           const selectedModelId = resolveModelSelection(arg);
@@ -1047,7 +1218,9 @@ export async function runTelegramBot(options = {}) {
               chatId,
               [
                 `Unknown model: ${trim(arg)}`,
+                "Usage: /model <id|number>",
                 "Use /models to see valid options.",
+                "Examples: /model 3, /model gpt-5.3-codex",
               ].join("\n"),
             );
             continue;
@@ -1070,6 +1243,18 @@ export async function runTelegramBot(options = {}) {
             botToken,
             chatId,
             `Model updated: ${resolveModelRef(activeModelId)}`,
+          );
+          continue;
+        }
+
+        if (command && command.startsWith("/") && !isKnownChatCommand(command)) {
+          await sendMessage(
+            botToken,
+            chatId,
+            [
+              `Unknown command: ${command}`,
+              "Use /help to see available commands and exact usage.",
+            ].join("\n"),
           );
           continue;
         }
@@ -1141,6 +1326,7 @@ export async function runTelegramBot(options = {}) {
           const response = await requestCodexResponse({
             accessToken: fresh.accessToken,
             modelId: activeModelId,
+            reasoningEffort: resolveReasoningEffort(config),
             instructions: codexInstructions,
             workspaceRoot: trim(config?.workspace?.root),
             isFirstTurn: history.length === 0,

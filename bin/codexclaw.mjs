@@ -18,7 +18,7 @@ function printHelp() {
       "Notes:",
       "  - onboard: OAuth + model select + telegram setup + optional Notion/web/scheduler skill setup",
       "  - telegram run: start long-polling bot",
-      "  - in Telegram: /new resets context, /context shows history size, /usage shows usage, /models and /model manage model",
+      "  - in Telegram: /help shows command usage, /new resets context, /context shows history size, /usage shows usage, /think manages reasoning effort, /models and /model manage model",
       "  - in bot terminal: bye or exit stops telegram run (/bye, /exit also work)",
       "  - bot proactively sends status updates (disable with telegram.proactiveStatus=false)",
     ].join("\n"),

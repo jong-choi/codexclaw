@@ -41,6 +41,7 @@ const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 8_192;
 const MAX_TOOL_ROUNDS = 6;
 const MAX_TOOL_RESULT_CHARS = 16_000;
+const REASONING_EFFORT_LEVELS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 
 const NOTION_TOOL_NAME = "notion_api_request";
 const WEB_SEARCH_TOOL_NAME = "web_search";
@@ -462,6 +463,26 @@ function normalizeCodexModelId(value) {
     return "";
   }
   return LEGACY_CODEX_MODEL_ID_ALIASES[raw] ?? raw;
+}
+
+function normalizeReasoningEffort(value) {
+  const normalized = trim(value).toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized === "off") {
+    return "none";
+  }
+  if (normalized === "x-high" || normalized === "x_high" || normalized === "extra-high") {
+    return "xhigh";
+  }
+  if (normalized === "extra_high") {
+    return "xhigh";
+  }
+  if (normalized === "extra high" || normalized === "x high") {
+    return "xhigh";
+  }
+  return normalized;
 }
 
 function buildFallbackCodexModel(modelId) {
@@ -2170,6 +2191,7 @@ export async function requestCodexResponse(params) {
   const accessToken = trim(params?.accessToken);
   const modelId = normalizeCodexModelId(params?.modelId);
   const message = trim(params?.message);
+  const reasoningEffortRaw = normalizeReasoningEffort(params?.reasoningEffort);
   const instructions = trim(params?.instructions) || DEFAULT_CODEX_INSTRUCTIONS;
   const workspaceRoot = resolveWorkspaceRoot(params?.workspaceRoot);
   const isFirstTurn = Boolean(params?.isFirstTurn);
@@ -2218,6 +2240,12 @@ export async function requestCodexResponse(params) {
   if (!message && history.length === 0) {
     throw new Error("Message is empty.");
   }
+  if (reasoningEffortRaw && !REASONING_EFFORT_LEVELS.has(reasoningEffortRaw)) {
+    throw new Error(
+      `Invalid reasoning effort: ${reasoningEffortRaw}. Use none|minimal|low|medium|high|xhigh.`,
+    );
+  }
+  const reasoningEffort = reasoningEffortRaw === "none" ? undefined : reasoningEffortRaw;
 
   try {
     await ensureWorkspaceScaffold(workspaceRoot);
@@ -2475,6 +2503,7 @@ export async function requestCodexResponse(params) {
         },
         {
           apiKey: accessToken,
+          reasoningEffort,
         },
       );
     } catch (error) {
