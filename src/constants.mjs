@@ -24,6 +24,15 @@ export const CONFIG_FILE_NAME = "config.json";
 export const CONFIG_VERSION = 1;
 
 export const NOTION_SKILL_KEY = "notion";
+export const NOTION_SKILL_DIR = "notion";
 export const NOTION_API_ENV_NAME = "NOTION_API_KEY";
 export const NOTION_API_BASE_URL = "https://api.notion.com";
 export const NOTION_API_VERSION = "2025-09-03";
+
+export const WEB_SEARCH_SKILL_KEY = "web_search";
+export const WEB_SEARCH_SKILL_DIR = "web-search";
+export const BRAVE_API_ENV_NAME = "BRAVE_API_KEY";
+export const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+
+export const WEB_FETCH_SKILL_KEY = "web_fetch";
+export const WEB_FETCH_SKILL_DIR = "web-fetch";

@@ -1,10 +1,13 @@
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
+  BRAVE_API_ENV_NAME,
   CODEX_MODEL_IDS,
   CODEX_PROVIDER_ID,
   LEGACY_CODEX_MODEL_ID_ALIASES,
   NOTION_API_ENV_NAME,
   NOTION_SKILL_KEY,
+  WEB_FETCH_SKILL_KEY,
+  WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
 import { loginCodexOAuth } from "./oauth.mjs";
 import { withPrompter } from "./prompt.mjs";
@@ -66,8 +69,27 @@ function resolveSkillApiKey(config, skillKey) {
   return trim(config?.skills?.entries?.[skillKey]?.apiKey);
 }
 
+function resolveSkillEnabled(config, skillKey) {
+  const entry = config?.skills?.entries?.[skillKey];
+  if (!entry || typeof entry !== "object") {
+    return false;
+  }
+  if (typeof entry.enabled === "boolean") {
+    return entry.enabled;
+  }
+  return true;
+}
+
 function resolveNotionSkillEnabled(config) {
   return Boolean(resolveSkillApiKey(config, NOTION_SKILL_KEY));
+}
+
+function resolveWebSearchSkillEnabled(config) {
+  return resolveSkillEnabled(config, WEB_SEARCH_SKILL_KEY);
+}
+
+function resolveWebFetchSkillEnabled(config) {
+  return resolveSkillEnabled(config, WEB_FETCH_SKILL_KEY);
 }
 
 export async function runOnboard(options = {}) {
@@ -88,11 +110,12 @@ export async function runOnboard(options = {}) {
     prompter.intro("CodexClaw onboarding");
     prompter.note(
       [
-        "This setup includes only 4 steps:",
+        "This setup includes only 5 steps:",
         "1) OpenAI Codex OAuth",
         "2) Choose one Codex model",
         "3) Configure Telegram bot",
         "4) Optional: configure Notion skill API key",
+        "5) Optional: configure web_search/web_fetch skills",
       ].join("\n"),
       "Scope",
     );
@@ -229,6 +252,79 @@ export async function runOnboard(options = {}) {
       });
     }
 
+    const existingWebSearchEnabled = resolveWebSearchSkillEnabled(next);
+    const existingWebSearchApiKey = resolveSkillApiKey(next, WEB_SEARCH_SKILL_KEY);
+    let enableWebSearch = false;
+    let webSearchApiKey = existingWebSearchApiKey;
+
+    if (existingWebSearchEnabled) {
+      const keep = await prompter.confirm({
+        message: "Web search skill is enabled. Keep it?",
+        initialValue: true,
+      });
+      if (keep) {
+        enableWebSearch = true;
+      } else {
+        enableWebSearch = await prompter.confirm({
+          message: "Enable web_search skill now? (optional)",
+          initialValue: false,
+        });
+        webSearchApiKey = "";
+      }
+    } else {
+      enableWebSearch = await prompter.confirm({
+        message: "Enable web_search skill now? (optional)",
+        initialValue: false,
+      });
+    }
+
+    if (enableWebSearch && existingWebSearchApiKey && webSearchApiKey) {
+      const keep = await prompter.confirm({
+        message: "Existing Brave Search API key found. Keep it?",
+        initialValue: true,
+      });
+      if (!keep) {
+        webSearchApiKey = "";
+      }
+    }
+
+    if (enableWebSearch && !webSearchApiKey) {
+      prompter.note(
+        [
+          "Create a Brave Search API key at https://brave.com/search/api/",
+          "Use the Data for Search plan and copy the API key.",
+        ].join("\n"),
+        "Brave API key",
+      );
+      webSearchApiKey = await prompter.text({
+        message: "Brave Search API key",
+        required: true,
+      });
+    }
+
+    const existingWebFetchEnabled = resolveWebFetchSkillEnabled(next);
+    let enableWebFetch = false;
+
+    if (existingWebFetchEnabled) {
+      const keep = await prompter.confirm({
+        message: "Web fetch skill is enabled. Keep it?",
+        initialValue: true,
+      });
+      if (keep) {
+        enableWebFetch = true;
+      } else {
+        enableWebFetch = await prompter.confirm({
+          message: "Enable web_fetch skill now? (optional)",
+          initialValue: false,
+        });
+      }
+    } else {
+      enableWebFetch = await prompter.confirm({
+        message: "Enable web_fetch skill now? (optional)",
+        initialValue: false,
+      });
+    }
+
     const nextSkillEntries = resolveSkillEntries(next);
     if (configureNotion) {
       nextSkillEntries[NOTION_SKILL_KEY] = {
@@ -237,6 +333,25 @@ export async function runOnboard(options = {}) {
       };
     } else {
       delete nextSkillEntries[NOTION_SKILL_KEY];
+    }
+
+    if (enableWebSearch) {
+      nextSkillEntries[WEB_SEARCH_SKILL_KEY] = {
+        ...(nextSkillEntries[WEB_SEARCH_SKILL_KEY] ?? {}),
+        enabled: true,
+        apiKey: trim(webSearchApiKey),
+      };
+    } else {
+      delete nextSkillEntries[WEB_SEARCH_SKILL_KEY];
+    }
+
+    if (enableWebFetch) {
+      nextSkillEntries[WEB_FETCH_SKILL_KEY] = {
+        ...(nextSkillEntries[WEB_FETCH_SKILL_KEY] ?? {}),
+        enabled: true,
+      };
+    } else {
+      delete nextSkillEntries[WEB_FETCH_SKILL_KEY];
     }
 
     if (Object.keys(nextSkillEntries).length > 0) {
@@ -255,6 +370,9 @@ export async function runOnboard(options = {}) {
 
     const saved = await saveConfig(next, loaded.path);
     const notionEnabled = resolveNotionSkillEnabled(saved.config);
+    const webSearchEnabled = resolveWebSearchSkillEnabled(saved.config);
+    const webSearchKeyConfigured = Boolean(resolveSkillApiKey(saved.config, WEB_SEARCH_SKILL_KEY));
+    const webFetchEnabled = resolveWebFetchSkillEnabled(saved.config);
 
     prompter.outro(
       [
@@ -265,6 +383,13 @@ export async function runOnboard(options = {}) {
         notionEnabled
           ? `Notion auth source: skills.entries.${NOTION_SKILL_KEY}.apiKey -> ${NOTION_API_ENV_NAME}`
           : "Notion auth source: not configured",
+        `Web search skill: ${webSearchEnabled ? "enabled" : "disabled"}`,
+        webSearchEnabled
+          ? webSearchKeyConfigured
+            ? `Web search auth source: skills.entries.${WEB_SEARCH_SKILL_KEY}.apiKey -> ${BRAVE_API_ENV_NAME}`
+            : `Web search auth source: missing (${BRAVE_API_ENV_NAME} not configured)`
+          : "Web search auth source: not configured",
+        `Web fetch skill: ${webFetchEnabled ? "enabled" : "disabled"}`,
         "First DM the bot in Telegram to receive a pairing code.",
         "Approve by entering the pairing code in the running bot terminal.",
         "Press Enter on an empty line to ignore.",

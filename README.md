@@ -6,6 +6,7 @@ Minimal onboarding + runtime for:
 2. Codex model selection (7 models)
 3. Telegram bot bridge
 4. Optional Notion skill API key setup
+5. Optional web tools (`web_search`, `web_fetch`) setup
 
 ## Install
 
@@ -38,6 +39,11 @@ Notion (optional):
 - During onboarding, you can enable the `notion` skill and save a Notion integration token.
 - Token is stored at `skills.entries.notion.apiKey`.
 - When configured, Codex can use the built-in `notion_api_request` tool for Notion REST calls.
+
+Web tools (optional):
+- During onboarding, you can enable `web_search` and `web_fetch` skills.
+- `web_search` uses Brave Search API (`skills.entries.web_search.apiKey` or `BRAVE_API_KEY`).
+- `web_fetch` fetches and extracts readable page content (no API key required).
 
 ## Run Telegram bot
 

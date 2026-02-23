@@ -1,13 +1,20 @@
 import { fileURLToPath } from "node:url";
 import { Type, completeSimple, getModel } from "@mariozechner/pi-ai";
 import {
+  BRAVE_API_ENV_NAME,
+  BRAVE_SEARCH_ENDPOINT,
   CODEX_API_BASE_URL,
   CODEX_PROVIDER_ID,
   LEGACY_CODEX_MODEL_ID_ALIASES,
   NOTION_API_BASE_URL,
   NOTION_API_ENV_NAME,
   NOTION_API_VERSION,
+  NOTION_SKILL_DIR,
   NOTION_SKILL_KEY,
+  WEB_FETCH_SKILL_DIR,
+  WEB_FETCH_SKILL_KEY,
+  WEB_SEARCH_SKILL_DIR,
+  WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
 
 const DEFAULT_CODEX_INSTRUCTIONS =
@@ -16,7 +23,23 @@ const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 8_192;
 const MAX_TOOL_ROUNDS = 6;
 const MAX_TOOL_RESULT_CHARS = 16_000;
+
 const NOTION_TOOL_NAME = "notion_api_request";
+const WEB_SEARCH_TOOL_NAME = "web_search";
+const WEB_FETCH_TOOL_NAME = "web_fetch";
+
+const WEB_SEARCH_DEFAULT_COUNT = 5;
+const WEB_SEARCH_MAX_COUNT = 10;
+const BRAVE_FRESHNESS_SHORTCUTS = new Set(["pd", "pw", "pm", "py"]);
+const BRAVE_FRESHNESS_RANGE = /^(\d{4}-\d{2}-\d{2})to(\d{4}-\d{2}-\d{2})$/;
+
+const WEB_FETCH_DEFAULT_MAX_CHARS = 50_000;
+const WEB_FETCH_MAX_CHARS_CAP = 50_000;
+const WEB_FETCH_DEFAULT_TIMEOUT_MS = 30_000;
+const WEB_FETCH_DEFAULT_ERROR_DETAIL_CHARS = 4_000;
+const WEB_FETCH_DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
 const NOTION_TOOL = {
   name: NOTION_TOOL_NAME,
   description:
@@ -34,6 +57,62 @@ const NOTION_TOOL = {
     }),
     body: Type.Optional(Type.Any()),
   }),
+};
+
+const WEB_SEARCH_TOOL = {
+  name: WEB_SEARCH_TOOL_NAME,
+  description:
+    "Search the web with Brave Search API. Returns result snippets (title/url/description).",
+  parameters: Type.Object({
+    query: Type.String({ minLength: 1, description: "Search query string." }),
+    count: Type.Optional(
+      Type.Number({
+        minimum: 1,
+        maximum: WEB_SEARCH_MAX_COUNT,
+        description: "Number of results to return (1-10).",
+      }),
+    ),
+    country: Type.Optional(
+      Type.String({
+        description: "2-letter country code for region-specific results (e.g., US, DE, ALL).",
+      }),
+    ),
+    search_lang: Type.Optional(
+      Type.String({ description: "ISO language code for search results (e.g., en, ko)." }),
+    ),
+    ui_lang: Type.Optional(
+      Type.String({ description: "ISO language code for UI elements." }),
+    ),
+    freshness: Type.Optional(
+      Type.String({
+        description: "Discovery time filter: pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD.",
+      }),
+    ),
+  }),
+};
+
+const WEB_FETCH_TOOL = {
+  name: WEB_FETCH_TOOL_NAME,
+  description:
+    "Fetch a URL and extract readable text content. Use this for lightweight page access without browser automation.",
+  parameters: Type.Object({
+    url: Type.String({ minLength: 1, description: "HTTP or HTTPS URL to fetch." }),
+    extractMode: Type.Optional(
+      Type.Union([Type.Literal("markdown"), Type.Literal("text")]),
+    ),
+    maxChars: Type.Optional(
+      Type.Number({
+        minimum: 100,
+        description: "Maximum characters to return (truncates when exceeded).",
+      }),
+    ),
+  }),
+};
+
+const SKILL_DIR_BY_KEY = {
+  [NOTION_SKILL_KEY]: NOTION_SKILL_DIR,
+  [WEB_SEARCH_SKILL_KEY]: WEB_SEARCH_SKILL_DIR,
+  [WEB_FETCH_SKILL_KEY]: WEB_FETCH_SKILL_DIR,
 };
 
 function trim(value) {
@@ -87,6 +166,8 @@ function collectTextFromAssistantMessage(message) {
         chunks.push(trim(block.text));
       }
     }
+  } else if (typeof message.content === "string" && trim(message.content)) {
+    chunks.push(trim(message.content));
   }
 
   return chunks.join("\n\n").trim();
@@ -131,45 +212,149 @@ function collectTextFromLegacyPayload(payload) {
   return chunks.join("\n\n").trim();
 }
 
+function resolveSkillEntry(skills, skillKey) {
+  const entry = skills?.entries?.[skillKey];
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  return entry;
+}
+
+function resolveSkillApiKey(skills, skillKey) {
+  return trim(skills?.entries?.[skillKey]?.apiKey);
+}
+
 function resolveNotionApiKey(skills) {
-  return trim(skills?.entries?.[NOTION_SKILL_KEY]?.apiKey);
+  return resolveSkillApiKey(skills, NOTION_SKILL_KEY);
 }
 
-function resolveNotionSkillPath() {
-  return fileURLToPath(new URL(`./skills/${NOTION_SKILL_KEY}/SKILL.md`, import.meta.url));
+function resolveWebSearchApiKey(skills) {
+  const fromConfig = resolveSkillApiKey(skills, WEB_SEARCH_SKILL_KEY);
+  const fromEnv = trim(process.env[BRAVE_API_ENV_NAME]);
+  return fromConfig || fromEnv;
 }
 
-function buildSkillsPrompt({ notionEnabled }) {
-  if (!notionEnabled) {
+function resolveWebSearchSkillEnabled(skills) {
+  const entry = resolveSkillEntry(skills, WEB_SEARCH_SKILL_KEY);
+  if (!entry) {
+    return false;
+  }
+  if (typeof entry.enabled === "boolean") {
+    return entry.enabled;
+  }
+  return true;
+}
+
+function resolveWebFetchSkillEnabled(skills) {
+  const entry = resolveSkillEntry(skills, WEB_FETCH_SKILL_KEY);
+  if (!entry) {
+    return false;
+  }
+  if (typeof entry.enabled === "boolean") {
+    return entry.enabled;
+  }
+  return true;
+}
+
+function resolveSkillPath(skillKey) {
+  const skillDir = SKILL_DIR_BY_KEY[skillKey];
+  if (!skillDir) {
     return "";
   }
-  const skillPath = resolveNotionSkillPath();
-  return [
+  return fileURLToPath(new URL(`./skills/${skillDir}/SKILL.md`, import.meta.url));
+}
+
+function buildSkillsPrompt({ notionEnabled, webSearchEnabled, webFetchEnabled, webSearchApiKey }) {
+  const skills = [];
+  if (notionEnabled) {
+    skills.push({
+      name: NOTION_SKILL_KEY,
+      description: "Notion API for creating and managing pages, databases, and blocks.",
+      location: resolveSkillPath(NOTION_SKILL_KEY),
+    });
+  }
+  if (webSearchEnabled) {
+    skills.push({
+      name: WEB_SEARCH_SKILL_KEY,
+      description: "Web search via Brave Search API.",
+      location: resolveSkillPath(WEB_SEARCH_SKILL_KEY),
+    });
+  }
+  if (webFetchEnabled) {
+    skills.push({
+      name: WEB_FETCH_SKILL_KEY,
+      description: "Fetch and extract readable content from web pages.",
+      location: resolveSkillPath(WEB_FETCH_SKILL_KEY),
+    });
+  }
+
+  if (skills.length === 0) {
+    return "";
+  }
+
+  const lines = [
     "## Skills (mandatory)",
     "Before replying: scan <available_skills> and apply the matching skill instructions.",
     "<available_skills>",
-    "  <skill>",
-    `    <name>${NOTION_SKILL_KEY}</name>`,
-    "    <description>Notion API for creating and managing pages, databases, and blocks.</description>",
-    `    <location>${skillPath}</location>`,
-    "  </skill>",
-    "</available_skills>",
-    `For Notion operations, use tool \`${NOTION_TOOL_NAME}\` instead of guessing API payloads.`,
-    `Authentication is already configured via ${NOTION_API_ENV_NAME}; never ask the user to reveal it.`,
-  ].join("\n");
+  ];
+
+  for (const skill of skills) {
+    lines.push("  <skill>");
+    lines.push(`    <name>${skill.name}</name>`);
+    lines.push(`    <description>${skill.description}</description>`);
+    lines.push(`    <location>${skill.location}</location>`);
+    lines.push("  </skill>");
+  }
+
+  lines.push("</available_skills>");
+
+  if (notionEnabled) {
+    lines.push(`For Notion operations, use tool \`${NOTION_TOOL_NAME}\` instead of guessing API payloads.`);
+    lines.push(
+      `Authentication is already configured via ${NOTION_API_ENV_NAME}; never ask the user to reveal it.`,
+    );
+  }
+  if (webSearchEnabled) {
+    lines.push(`For web lookup, use tool \`${WEB_SEARCH_TOOL_NAME}\`.`);
+    if (webSearchApiKey) {
+      lines.push(`Brave auth is already configured via ${BRAVE_API_ENV_NAME}; never ask the user to reveal it.`);
+    } else {
+      lines.push(
+        `If ${WEB_SEARCH_TOOL_NAME} returns missing API key, tell the user to configure ${BRAVE_API_ENV_NAME}.`,
+      );
+    }
+  }
+  if (webFetchEnabled) {
+    lines.push(`For direct page retrieval, use tool \`${WEB_FETCH_TOOL_NAME}\`.`);
+  }
+
+  return lines.join("\n");
 }
 
-function buildSystemPrompt({ instructions, notionEnabled }) {
-  const skillsPrompt = buildSkillsPrompt({ notionEnabled });
+function buildSystemPrompt({ instructions, notionEnabled, webSearchEnabled, webFetchEnabled, webSearchApiKey }) {
+  const skillsPrompt = buildSkillsPrompt({
+    notionEnabled,
+    webSearchEnabled,
+    webFetchEnabled,
+    webSearchApiKey,
+  });
   return [instructions, skillsPrompt].filter(Boolean).join("\n\n");
 }
 
-function collectToolCalls(message, toolName) {
+function collectToolCalls(message, toolNames) {
   if (!message || typeof message !== "object" || !Array.isArray(message.content)) {
     return [];
   }
+  const allowed = new Set(Array.isArray(toolNames) ? toolNames.map((name) => trim(name)) : []);
+  if (allowed.size === 0) {
+    return [];
+  }
   return message.content.filter(
-    (block) => block && typeof block === "object" && block.type === "toolCall" && block.name === toolName,
+    (block) =>
+      block &&
+      typeof block === "object" &&
+      block.type === "toolCall" &&
+      allowed.has(trim(block.name)),
   );
 }
 
@@ -307,16 +492,183 @@ function normalizeNotionPath(value) {
   return normalized;
 }
 
+function resolveWebSearchCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return WEB_SEARCH_DEFAULT_COUNT;
+  }
+  return Math.max(1, Math.min(WEB_SEARCH_MAX_COUNT, Math.floor(parsed)));
+}
+
+function isValidIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const [year, month, day] = value.split("-").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return false;
+  }
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
+
+function normalizeWebSearchFreshness(value) {
+  const raw = trim(value).toLowerCase();
+  if (!raw) {
+    return "";
+  }
+  if (BRAVE_FRESHNESS_SHORTCUTS.has(raw)) {
+    return raw;
+  }
+  const matched = raw.match(BRAVE_FRESHNESS_RANGE);
+  if (!matched) {
+    return "";
+  }
+  const [, start, end] = matched;
+  if (!isValidIsoDate(start) || !isValidIsoDate(end) || start > end) {
+    return "";
+  }
+  return `${start}to${end}`;
+}
+
+function normalizeWebFetchUrl(value) {
+  const raw = trim(value);
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "";
+    }
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeWebFetchExtractMode(value) {
+  return trim(value).toLowerCase() === "text" ? "text" : "markdown";
+}
+
+function resolveWebFetchMaxChars(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return WEB_FETCH_DEFAULT_MAX_CHARS;
+  }
+  return Math.max(100, Math.min(WEB_FETCH_MAX_CHARS_CAP, Math.floor(parsed)));
+}
+
+function decodeHtmlEntities(value) {
+  if (!value) {
+    return "";
+  }
+  const entities = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    apos: "'",
+    nbsp: " ",
+  };
+
+  return value
+    .replace(/&#(\d+);/g, (_, num) => {
+      const codePoint = Number.parseInt(num, 10);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : _;
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+      const codePoint = Number.parseInt(hex, 16);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : _;
+    })
+    .replace(/&([a-zA-Z]+);/g, (full, name) => entities[name] ?? full);
+}
+
+function extractHtmlTitle(html) {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!match) {
+    return "";
+  }
+  return decodeHtmlEntities(match[1]).replace(/\s+/g, " ").trim();
+}
+
+function stripHtmlToText(html) {
+  if (!html) {
+    return "";
+  }
+
+  let text = html;
+  text = text.replace(/<!--[\s\S]*?-->/g, " ");
+  text = text.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ");
+  text = text.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ");
+  text = text.replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, " ");
+  text = text.replace(/<\s*br\s*\/?>/gi, "\n");
+  text = text.replace(/<\s*\/\s*(p|div|section|article|main|header|footer|aside|li|ul|ol|h[1-6]|table|tr|pre|blockquote)\s*>/gi, "\n");
+  text = text.replace(/<[^>]+>/g, " ");
+  text = decodeHtmlEntities(text);
+  text = text.replace(/\r/g, "");
+  text = text.replace(/[ \t]+\n/g, "\n");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  text = text.replace(/[ \t]{2,}/g, " ");
+  return text.trim();
+}
+
+function markdownToText(value) {
+  const raw = trim(value);
+  if (!raw) {
+    return "";
+  }
+  return raw
+    .replace(/```[\s\S]*?```/g, (block) => block.replace(/```/g, ""))
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^\)]*\)/g, "")
+    .replace(/\[([^\]]+)\]\([^\)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s{0,3}[-*+]\s+/gm, "")
+    .replace(/^\s{0,3}\d+\.\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/_([^_]+)_/g, "$1")
+    .trim();
+}
+
+function normalizeContentType(value) {
+  const raw = trim(value);
+  if (!raw) {
+    return "application/octet-stream";
+  }
+  const [type] = raw.split(";");
+  return trim(type).toLowerCase() || "application/octet-stream";
+}
+
+function truncateText(value, maxChars) {
+  const raw = String(value ?? "");
+  if (raw.length <= maxChars) {
+    return {
+      text: raw,
+      truncated: false,
+    };
+  }
+  const suffix = "\n...[truncated]";
+  const head = Math.max(0, maxChars - suffix.length);
+  return {
+    text: `${raw.slice(0, head)}${suffix}`,
+    truncated: true,
+  };
+}
+
 function buildToolResultText(payload) {
-  const serialized =
-    typeof payload === "string" ? payload : JSON.stringify(payload ?? {}, null, 2);
+  const serialized = typeof payload === "string" ? payload : JSON.stringify(payload ?? {}, null, 2);
   if (serialized.length <= MAX_TOOL_RESULT_CHARS) {
     return serialized;
   }
   return `${serialized.slice(0, MAX_TOOL_RESULT_CHARS)}\n...[truncated]`;
 }
 
-async function parseNotionResponseBody(response) {
+async function parseResponseBody(response) {
   const raw = await response.text();
   if (!raw) {
     return null;
@@ -332,7 +684,7 @@ function buildToolResultMessage(toolCall, result) {
   return {
     role: "toolResult",
     toolCallId: trim(toolCall?.id) || `tool-${Date.now()}`,
-    toolName: trim(toolCall?.name) || NOTION_TOOL_NAME,
+    toolName: trim(toolCall?.name) || "tool",
     content: [
       {
         type: "text",
@@ -351,6 +703,67 @@ async function emitToolEvent(handler, event) {
   try {
     await handler(event);
   } catch {}
+}
+
+function normalizeToolCallArguments(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {}
+  }
+  return {};
+}
+
+function truncateToolPath(value) {
+  const raw = trim(value);
+  if (!raw) {
+    return "";
+  }
+  if (raw.length <= 160) {
+    return raw;
+  }
+  return `${raw.slice(0, 157)}...`;
+}
+
+function resolveToolTarget(toolName, args) {
+  if (toolName === NOTION_TOOL_NAME) {
+    return {
+      method: normalizeNotionMethod(args?.method) || trim(args?.method).toUpperCase(),
+      path: truncateToolPath(normalizeNotionPath(args?.path) || trim(args?.path)),
+    };
+  }
+  if (toolName === WEB_SEARCH_TOOL_NAME) {
+    return {
+      method: "SEARCH",
+      path: truncateToolPath(trim(args?.query)),
+    };
+  }
+  if (toolName === WEB_FETCH_TOOL_NAME) {
+    return {
+      method: "GET",
+      path: truncateToolPath(trim(args?.url)),
+    };
+  }
+  return {
+    method: "",
+    path: "",
+  };
+}
+
+function buildMissingBraveApiKeyPayload() {
+  return {
+    ok: false,
+    error: "missing_brave_api_key",
+    message:
+      "web_search needs a Brave Search API key. Configure skills.entries.web_search.apiKey or set BRAVE_API_KEY.",
+    docs: "https://docs.openclaw.ai/tools/web",
+  };
 }
 
 async function executeNotionToolCall(params) {
@@ -392,7 +805,7 @@ async function executeNotionToolCall(params) {
 
   try {
     const response = await fetch(`${NOTION_API_BASE_URL}${path}`, request);
-    const body = await parseNotionResponseBody(response);
+    const body = await parseResponseBody(response);
     return {
       ok: response.ok,
       status: response.status,
@@ -405,6 +818,205 @@ async function executeNotionToolCall(params) {
       ok: false,
       path,
       method,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeWebSearchToolCall(params) {
+  const apiKey = trim(params?.apiKey);
+  const query = trim(params?.query);
+  const count = resolveWebSearchCount(params?.count);
+  const country = trim(params?.country);
+  const searchLang = trim(params?.search_lang);
+  const uiLang = trim(params?.ui_lang);
+  const freshnessRaw = trim(params?.freshness);
+  const freshness = normalizeWebSearchFreshness(freshnessRaw);
+
+  if (!query) {
+    return {
+      ok: false,
+      error: "Query is required.",
+    };
+  }
+  if (!apiKey) {
+    return buildMissingBraveApiKeyPayload();
+  }
+  if (freshnessRaw && !freshness) {
+    return {
+      ok: false,
+      error: "Invalid freshness. Use pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD.",
+    };
+  }
+
+  const searchParams = new URLSearchParams();
+  searchParams.set("q", query);
+  searchParams.set("count", String(count));
+  if (country) {
+    searchParams.set("country", country);
+  }
+  if (searchLang) {
+    searchParams.set("search_lang", searchLang);
+  }
+  if (uiLang) {
+    searchParams.set("ui_lang", uiLang);
+  }
+  if (freshness) {
+    searchParams.set("freshness", freshness);
+  }
+
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(`${BRAVE_SEARCH_ENDPOINT}?${searchParams.toString()}`, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "X-Subscription-Token": apiKey,
+      },
+      signal: AbortSignal.timeout(WEB_FETCH_DEFAULT_TIMEOUT_MS),
+    });
+
+    const body = await parseResponseBody(response);
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        provider: "brave",
+        query,
+        error: `Brave API error (${response.status})`,
+        body,
+      };
+    }
+
+    const rows = Array.isArray(body?.web?.results) ? body.web.results : [];
+    const results = rows.slice(0, count).map((entry) => ({
+      title: trim(entry?.title),
+      url: trim(entry?.url),
+      description: trim(entry?.description),
+      age: trim(entry?.age),
+    }));
+
+    return {
+      ok: true,
+      status: response.status,
+      provider: "brave",
+      query,
+      count,
+      country: country || undefined,
+      search_lang: searchLang || undefined,
+      ui_lang: uiLang || undefined,
+      freshness: freshness || undefined,
+      tookMs: Date.now() - startedAt,
+      results,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      provider: "brave",
+      query,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+function formatWebFetchErrorDetail(value, contentType) {
+  const raw = trim(value);
+  if (!raw) {
+    return "";
+  }
+  const normalizedType = normalizeContentType(contentType);
+  const rendered = normalizedType.includes("text/html") ? stripHtmlToText(raw) : raw;
+  return truncateText(rendered, WEB_FETCH_DEFAULT_ERROR_DETAIL_CHARS).text;
+}
+
+async function executeWebFetchToolCall(params) {
+  const url = normalizeWebFetchUrl(params?.url);
+  const extractMode = normalizeWebFetchExtractMode(params?.extractMode);
+  const maxChars = resolveWebFetchMaxChars(params?.maxChars);
+
+  if (!url) {
+    return {
+      ok: false,
+      error: "Invalid URL. Use http:// or https://",
+    };
+  }
+
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "text/markdown, text/html;q=0.9, application/json;q=0.8, text/plain;q=0.7, */*;q=0.1",
+        "User-Agent": WEB_FETCH_DEFAULT_USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(WEB_FETCH_DEFAULT_TIMEOUT_MS),
+    });
+
+    const rawBody = await response.text();
+    const contentType = normalizeContentType(response.headers.get("content-type"));
+    if (!response.ok) {
+      return {
+        ok: false,
+        url,
+        finalUrl: trim(response.url) || url,
+        status: response.status,
+        contentType,
+        error: `Web fetch failed (${response.status})`,
+        detail: formatWebFetchErrorDetail(rawBody, contentType),
+      };
+    }
+
+    let extractor = "raw";
+    let title = "";
+    let text = rawBody;
+
+    if (contentType.includes("text/html")) {
+      title = extractHtmlTitle(rawBody);
+      text = stripHtmlToText(rawBody);
+      extractor = "html";
+    } else if (contentType.includes("application/json")) {
+      try {
+        text = JSON.stringify(JSON.parse(rawBody), null, 2);
+        extractor = "json";
+      } catch {
+        text = rawBody;
+        extractor = "json-raw";
+      }
+    } else if (contentType.includes("text/markdown")) {
+      extractor = "markdown";
+      if (extractMode === "text") {
+        text = markdownToText(rawBody);
+      }
+    } else if (contentType.startsWith("text/")) {
+      extractor = "text";
+    }
+
+    if (extractMode === "text" && extractor !== "markdown") {
+      text = trim(text);
+    }
+
+    const truncated = truncateText(text, maxChars);
+    return {
+      ok: true,
+      url,
+      finalUrl: trim(response.url) || url,
+      status: response.status,
+      contentType,
+      title: title || undefined,
+      extractMode,
+      extractor,
+      truncated: truncated.truncated,
+      length: truncated.text.length,
+      fetchedAt: new Date().toISOString(),
+      tookMs: Date.now() - startedAt,
+      text: truncated.text,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      url,
       error: trim(error?.message) || String(error),
     };
   }
@@ -441,8 +1053,15 @@ export async function requestCodexResponse(params) {
   const modelId = normalizeCodexModelId(params?.modelId);
   const message = trim(params?.message);
   const instructions = trim(params?.instructions) || DEFAULT_CODEX_INSTRUCTIONS;
+
   const notionApiKey = resolveNotionApiKey(params?.skills);
   const notionEnabled = Boolean(notionApiKey);
+
+  const webSearchEnabled = resolveWebSearchSkillEnabled(params?.skills);
+  const webSearchApiKey = resolveWebSearchApiKey(params?.skills);
+
+  const webFetchEnabled = resolveWebFetchSkillEnabled(params?.skills);
+
   const model = resolveCodexModel(modelId);
   const history = normalizeConversationMessages(params?.messages, model);
 
@@ -456,7 +1075,14 @@ export async function requestCodexResponse(params) {
     throw new Error("Message is empty.");
   }
 
-  const systemPrompt = buildSystemPrompt({ instructions, notionEnabled });
+  const systemPrompt = buildSystemPrompt({
+    instructions,
+    notionEnabled,
+    webSearchEnabled,
+    webFetchEnabled,
+    webSearchApiKey,
+  });
+
   const messages =
     history.length > 0
       ? history.map((entry) => ({ ...entry }))
@@ -468,6 +1094,36 @@ export async function requestCodexResponse(params) {
           },
         ];
 
+  const enabledTools = [];
+  const toolHandlers = new Map();
+
+  if (notionEnabled) {
+    enabledTools.push(NOTION_TOOL);
+    toolHandlers.set(NOTION_TOOL_NAME, async (rawArgs) =>
+      executeNotionToolCall({
+        ...rawArgs,
+        apiKey: notionApiKey,
+      }),
+    );
+  }
+
+  if (webSearchEnabled) {
+    enabledTools.push(WEB_SEARCH_TOOL);
+    toolHandlers.set(WEB_SEARCH_TOOL_NAME, async (rawArgs) =>
+      executeWebSearchToolCall({
+        ...rawArgs,
+        apiKey: webSearchApiKey,
+      }),
+    );
+  }
+
+  if (webFetchEnabled) {
+    enabledTools.push(WEB_FETCH_TOOL);
+    toolHandlers.set(WEB_FETCH_TOOL_NAME, async (rawArgs) => executeWebFetchToolCall(rawArgs));
+  }
+
+  const enabledToolNames = Array.from(toolHandlers.keys());
+
   let response = null;
   const toolEvents = [];
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
@@ -477,7 +1133,7 @@ export async function requestCodexResponse(params) {
         {
           systemPrompt,
           messages,
-          tools: notionEnabled ? [NOTION_TOOL] : undefined,
+          tools: enabledTools.length > 0 ? enabledTools : undefined,
         },
         {
           apiKey: accessToken,
@@ -489,52 +1145,54 @@ export async function requestCodexResponse(params) {
 
     validateAssistantResponse(response);
 
-    if (!notionEnabled) {
+    if (enabledToolNames.length === 0) {
       break;
     }
 
-    const notionCalls = collectToolCalls(response, NOTION_TOOL_NAME);
-    if (notionCalls.length === 0) {
+    const toolCalls = collectToolCalls(response, enabledToolNames);
+    if (toolCalls.length === 0) {
       break;
     }
     if (round === MAX_TOOL_ROUNDS - 1) {
-      throw new Error("Notion tool call limit reached.");
+      throw new Error("Tool call limit reached.");
     }
 
     messages.push(response);
 
-    for (let i = 0; i < notionCalls.length; i += 1) {
-      const toolCall = notionCalls[i];
-      const rawArgs =
-        toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : {};
+    for (let i = 0; i < toolCalls.length; i += 1) {
+      const toolCall = toolCalls[i];
+      const toolName = trim(toolCall?.name);
+      const handler = toolHandlers.get(toolName);
+      if (typeof handler !== "function") {
+        continue;
+      }
+
+      const rawArgs = normalizeToolCallArguments(toolCall?.arguments);
       const toolCallId = trim(toolCall?.id) || `tool-${Date.now()}-${i + 1}`;
-      const method = normalizeNotionMethod(rawArgs.method) || trim(rawArgs.method).toUpperCase();
-      const path = normalizeNotionPath(rawArgs.path) || trim(rawArgs.path);
+      const target = resolveToolTarget(toolName, rawArgs);
+
       await emitToolEvent(params?.onToolEvent, {
         phase: "start",
-        toolName: NOTION_TOOL_NAME,
+        toolName,
         toolCallId,
-        method,
-        path,
+        method: target.method,
+        path: target.path,
         round: round + 1,
         index: i + 1,
-        total: notionCalls.length,
+        total: toolCalls.length,
       });
 
       const startedAt = Date.now();
-      const result = await executeNotionToolCall({
-        ...rawArgs,
-        apiKey: notionApiKey,
-      });
+      const result = await handler(rawArgs);
       const event = {
         phase: "result",
-        toolName: NOTION_TOOL_NAME,
+        toolName,
         toolCallId,
-        method,
-        path,
+        method: target.method,
+        path: target.path,
         round: round + 1,
         index: i + 1,
-        total: notionCalls.length,
+        total: toolCalls.length,
         ok: Boolean(result?.ok),
         status: Number.isFinite(Number(result?.status)) ? Number(result.status) : undefined,
         error: trim(result?.error),
