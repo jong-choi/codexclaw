@@ -156,6 +156,8 @@ function buildSkillsPrompt({ notionEnabled }) {
     "</available_skills>",
     `For Notion operations, use tool \`${NOTION_TOOL_NAME}\` instead of guessing API payloads.`,
     `Authentication is already configured via ${NOTION_API_ENV_NAME}; never ask the user to reveal it.`,
+    "Never end with progress-only text such as 'checking now' or 'one moment'.",
+    "If you call a tool, wait for the tool result and then provide a complete final answer.",
   ].join("\n");
 }
 
@@ -171,6 +173,35 @@ function collectToolCalls(message, toolName) {
   return message.content.filter(
     (block) => block && typeof block === "object" && block.type === "toolCall" && block.name === toolName,
   );
+}
+
+function normalizeConversationMessages(rawMessages) {
+  if (!Array.isArray(rawMessages)) {
+    return [];
+  }
+
+  const out = [];
+  for (const raw of rawMessages) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const role = trim(raw.role).toLowerCase();
+    if (role !== "user" && role !== "assistant") {
+      continue;
+    }
+    const content = trim(raw.content);
+    if (!content) {
+      continue;
+    }
+    const timestampRaw = Number(raw.timestamp);
+    const timestamp = Number.isFinite(timestampRaw) && timestampRaw > 0 ? timestampRaw : Date.now();
+    out.push({
+      role,
+      content,
+      timestamp,
+    });
+  }
+  return out;
 }
 
 function normalizeNotionMethod(value) {
@@ -244,6 +275,15 @@ function buildToolResultMessage(toolCall, result) {
     isError: !result?.ok,
     timestamp: Date.now(),
   };
+}
+
+async function emitToolEvent(handler, event) {
+  if (typeof handler !== "function") {
+    return;
+  }
+  try {
+    await handler(event);
+  } catch {}
 }
 
 async function executeNotionToolCall(params) {
@@ -336,6 +376,7 @@ export async function requestCodexResponse(params) {
   const instructions = trim(params?.instructions) || DEFAULT_CODEX_INSTRUCTIONS;
   const notionApiKey = resolveNotionApiKey(params?.skills);
   const notionEnabled = Boolean(notionApiKey);
+  const history = normalizeConversationMessages(params?.messages);
 
   if (!accessToken) {
     throw new Error("Missing access token.");
@@ -343,21 +384,25 @@ export async function requestCodexResponse(params) {
   if (!modelId) {
     throw new Error("Missing model id.");
   }
-  if (!message) {
+  if (!message && history.length === 0) {
     throw new Error("Message is empty.");
   }
 
   const model = resolveCodexModel(modelId);
   const systemPrompt = buildSystemPrompt({ instructions, notionEnabled });
-  const messages = [
-    {
-      role: "user",
-      content: message,
-      timestamp: Date.now(),
-    },
-  ];
+  const messages =
+    history.length > 0
+      ? history.map((entry) => ({ ...entry }))
+      : [
+          {
+            role: "user",
+            content: message,
+            timestamp: Date.now(),
+          },
+        ];
 
   let response = null;
+  const toolEvents = [];
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     try {
       response = await completeSimple(
@@ -391,11 +436,45 @@ export async function requestCodexResponse(params) {
 
     messages.push(response);
 
-    for (const toolCall of notionCalls) {
+    for (let i = 0; i < notionCalls.length; i += 1) {
+      const toolCall = notionCalls[i];
+      const rawArgs =
+        toolCall?.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : {};
+      const toolCallId = trim(toolCall?.id) || `tool-${Date.now()}-${i + 1}`;
+      const method = normalizeNotionMethod(rawArgs.method) || trim(rawArgs.method).toUpperCase();
+      const path = normalizeNotionPath(rawArgs.path) || trim(rawArgs.path);
+      await emitToolEvent(params?.onToolEvent, {
+        phase: "start",
+        toolName: NOTION_TOOL_NAME,
+        toolCallId,
+        method,
+        path,
+        round: round + 1,
+        index: i + 1,
+        total: notionCalls.length,
+      });
+
+      const startedAt = Date.now();
       const result = await executeNotionToolCall({
-        ...(toolCall.arguments ?? {}),
+        ...rawArgs,
         apiKey: notionApiKey,
       });
+      const event = {
+        phase: "result",
+        toolName: NOTION_TOOL_NAME,
+        toolCallId,
+        method,
+        path,
+        round: round + 1,
+        index: i + 1,
+        total: notionCalls.length,
+        ok: Boolean(result?.ok),
+        status: Number.isFinite(Number(result?.status)) ? Number(result.status) : undefined,
+        error: trim(result?.error),
+        durationMs: Date.now() - startedAt,
+      };
+      toolEvents.push(event);
+      await emitToolEvent(params?.onToolEvent, event);
       messages.push(buildToolResultMessage(toolCall, result));
     }
   }
@@ -412,5 +491,6 @@ export async function requestCodexResponse(params) {
   return {
     text,
     payload: response,
+    toolEvents,
   };
 }

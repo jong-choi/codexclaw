@@ -268,6 +268,8 @@ export async function runOnboard(options = {}) {
         "First DM the bot in Telegram to receive a pairing code.",
         "Approve by entering the pairing code in the running bot terminal.",
         "Press Enter on an empty line to ignore.",
+        "Conversation context is persisted between turns.",
+        "Use /new to reset context, /context to inspect history size.",
         "Run: npm run telegram",
       ].join("\n"),
     );

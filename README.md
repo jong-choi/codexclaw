@@ -32,6 +32,8 @@ Telegram access follows openclaw-style pairing by default (`dmPolicy: "pairing"`
 - enter that code in the running `npm run telegram` terminal and press Enter
 - empty line means "no code" (ignored)
 
+Conversation history is stored in `~/.codexclaw/telegram-conversations.json`.
+
 Notion (optional):
 - During onboarding, you can enable the `notion` skill and save a Notion integration token.
 - Token is stored at `skills.entries.notion.apiKey`.
@@ -42,6 +44,12 @@ Notion (optional):
 ```bash
 npm run telegram
 ```
+
+Runtime behavior:
+- Multi-turn context is preserved per Telegram chat/session.
+- `/new`, `/clear`, `/reset`: clear saved context for the current chat.
+- `/context`: show the number of stored context messages.
+- During skill/tool execution, the bot posts live status updates and a final execution log.
 
 ## Show config (redacted)
 
