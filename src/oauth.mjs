@@ -14,19 +14,6 @@ function validateRequiredInput(value) {
 }
 
 function createOAuthHandlers(params) {
-  let manualCodePromise = null;
-
-  function createManualCodePrompt(prompt) {
-    return params.prompter
-      .text({
-        message: trim(prompt?.message) || "Paste the redirect URL",
-        placeholder: trim(prompt?.placeholder) || "http://127.0.0.1:1455/auth/callback?code=...",
-        validate: validateRequiredInput,
-        signal: params.signal,
-      })
-      .then((value) => String(value));
-  }
-
   return {
     async onAuth(event) {
       const url = trim(event?.url);
@@ -39,26 +26,18 @@ function createOAuthHandlers(params) {
     },
 
     async onPrompt(prompt) {
-      if (!manualCodePromise) {
-        manualCodePromise = createManualCodePrompt(prompt);
-      }
-      try {
-        return await manualCodePromise;
-      } catch (error) {
-        if (error && typeof error === "object" && error.name === "AbortError") {
-          return "";
-        }
-        throw error;
-      } finally {
-        manualCodePromise = null;
-      }
+      const code = await params.prompter.text({
+        message: "Paste the redirect URL",
+        placeholder: trim(prompt?.placeholder) || "http://127.0.0.1:1455/auth/callback?code=...",
+        validate: validateRequiredInput,
+      });
+      return String(code);
     },
   };
 }
 
 export async function loginCodexOAuth(params) {
   const spin = params.prompter.progress("Starting OAuth flow...");
-  const promptAbortController = new AbortController();
 
   params.prompter.note(
     [
@@ -74,7 +53,6 @@ export async function loginCodexOAuth(params) {
       prompter: params.prompter,
       spin,
       log: params.log,
-      signal: promptAbortController.signal,
     });
 
     const creds = await loginOpenAICodex({
@@ -83,13 +61,13 @@ export async function loginCodexOAuth(params) {
       onProgress: (message) => {
         spin.update(trim(message));
       },
+      // Force manual redirect-url input flow by cancelling local callback auto-complete path.
+      onManualCodeInput: async () => "",
     });
 
-    promptAbortController.abort();
     spin.stop("OpenAI OAuth complete");
     return creds ?? null;
   } catch (error) {
-    promptAbortController.abort();
     spin.stop("OpenAI OAuth failed");
     params.error(String(error));
     params.prompter.note(
