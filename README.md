@@ -137,6 +137,8 @@ Scheduler (optional):
 - `schedule_delete`: cancel one job
 - Chat timezone tools: `timezone_get`, `timezone_set`, `current_time_get`
 - Timezone is configured during Telegram chat (`timezone_set`), not during onboarding.
+- `schedule_create.prompt` should be a future instruction, not the original scheduling sentence.
+  Example: `Schedule a reminder for 8 AM tomorrow to call my mom` -> `Tell the user to call their mom now.`
 - Scheduled tasks are chat-scoped and trigger a new Codex run when due.
 
 Workspace files (always available):

@@ -186,11 +186,12 @@ const WORKSPACE_DELETE_TOOL = {
 const SCHEDULE_CREATE_TOOL = {
   name: SCHEDULE_CREATE_TOOL_NAME,
   description:
-    "Create a one-time scheduled task for the current Telegram chat. The stored prompt will be sent back into Codex at run time.",
+    "Create a one-time scheduled task for the current Telegram chat. The stored prompt will be sent back into Codex at run time, so write prompt as the exact future instruction.",
   parameters: Type.Object({
     prompt: Type.String({
       minLength: 1,
-      description: "Prompt to run when the schedule fires.",
+      description:
+        "Future instruction to run when schedule fires (not the original scheduling sentence). Example: 'Tell the user to call their mom now.'",
     }),
     delaySeconds: Type.Optional(
       Type.Number({
@@ -571,6 +572,18 @@ function buildSkillsPrompt({
   if (schedulerEnabled) {
     lines.push(
       `For reminders/scheduling, use tools \`${SCHEDULE_CREATE_TOOL_NAME}\`, \`${SCHEDULE_LIST_TOOL_NAME}\`, \`${SCHEDULE_DELETE_TOOL_NAME}\`.`,
+    );
+    lines.push(
+      "Important: schedule_create.prompt is executed later as a new Codex request. Write it as the exact future instruction.",
+    );
+    lines.push(
+      "Do not copy the user's scheduling sentence into prompt. Rewrite it into what future Codex should do.",
+    );
+    lines.push(
+      "Few-shot: user='Schedule a reminder for 8 AM tomorrow to call my mom' -> schedule_create.prompt='Tell the user to call their mom now.'",
+    );
+    lines.push(
+      "Few-shot: user='Remind me in 10 minutes to drink water' -> schedule_create.prompt='Tell the user to drink water now.'",
     );
     lines.push("For relative requests (e.g. 'in 3 minutes'), prefer delaySeconds.");
     lines.push(
