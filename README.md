@@ -42,7 +42,7 @@ Run Telegram bot with Docker (interactive, recommended for pairing code input):
 docker compose run --rm codexclaw telegram run
 ```
 
-In this interactive terminal, type `/bye` or `/exit` to stop the bot process cleanly.
+In this interactive terminal, type `bye` or `exit` to stop the bot process and return to shell (`/bye`, `/exit` also work).
 
 Recommended flow:
 - First run: use `--rm` interactive mode to approve pairing code in terminal.
@@ -115,7 +115,7 @@ Telegram access follows openclaw-style pairing by default (`dmPolicy: "pairing"`
 - bot replies with a pairing code
 - enter that code in the running `npm run telegram` terminal and press Enter
 - empty line means "no code" (ignored)
-- type `/bye` or `/exit` in the running bot terminal to stop the process
+- type `bye` or `exit` in the running bot terminal to stop the process (`/bye`, `/exit` also work)
 
 Conversation history is stored in `~/.codexclaw/telegram-conversations.json`.
 
@@ -150,7 +150,7 @@ Runtime behavior:
 - Multi-turn context is preserved per Telegram chat/session.
 - `/new`, `/clear`, `/reset`: clear saved context for the current chat.
 - `/context`: show the number of stored context messages.
-- Terminal input `/bye` or `/exit`: stop `telegram run` immediately.
+- Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
 - The bot proactively posts a status message immediately after receiving a request.
 - While processing, it updates status periodically and during skill/tool calls.
 - It posts final completion/failure status, plus a skill execution log when tools were used.

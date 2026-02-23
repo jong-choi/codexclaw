@@ -39,7 +39,7 @@ const PROACTIVE_STATUS_QUIET_AFTER_TOOL_MS = 8_000;
 
 function isInlineExitCommand(value) {
   const token = trim(value).toLowerCase();
-  return token === "/bye" || token === "/exit";
+  return token === "bye" || token === "exit" || token === "/bye" || token === "/exit";
 }
 
 function startInlinePairingApproval(params) {
@@ -51,7 +51,7 @@ function startInlinePairingApproval(params) {
   }
 
   process.stdout.write(
-    "Enter pairing code in this terminal and press Enter to approve sender (empty line = ignore, /bye or /exit = stop bot).\n",
+    "Enter pairing code in this terminal and press Enter to approve sender (empty line = ignore, bye/exit = stop bot).\n",
   );
 
   process.stdin.setEncoding("utf8");
@@ -505,6 +505,7 @@ export async function runTelegramBot(options = {}) {
     pollingAbortController?.abort();
     pollingAbortController = null;
     process.stdout.write("Exit command received. Stopping CodexClaw Telegram bot.\n");
+    process.exit(0);
   };
 
   process.stdout.write(`CodexClaw Telegram bot is running.\n`);
