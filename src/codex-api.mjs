@@ -33,7 +33,7 @@ import {
   resumeRecurringScheduledJob,
 } from "./schedule-store.mjs";
 import { getTelegramChatTimezone, setTelegramChatTimezone } from "./telegram-settings-store.mjs";
-import { ensureWorkspaceInitialized, resolveWorkspaceRoot } from "./workspace.mjs";
+import { ensureWorkspaceInitialized, resolveWorkspaceRoot, resolveWorkspaceTemplateRoot } from "./workspace.mjs";
 
 const DEFAULT_CODEX_INSTRUCTIONS =
   "You are an AI assistant. Answer clearly and helpfully in the user's language. Do not introduce yourself with product/project names unless the user explicitly asks.";
@@ -1389,9 +1389,10 @@ function resolveToolTarget(toolName, args) {
   };
 }
 
-async function ensureWorkspaceScaffold(workspaceRoot) {
+async function ensureWorkspaceScaffold(workspaceRoot, workspaceTemplateRoot) {
   await ensureWorkspaceInitialized({
     workspaceRoot,
+    templateRoot: workspaceTemplateRoot,
   });
 }
 
@@ -2200,6 +2201,7 @@ export async function requestCodexResponse(params) {
   const reasoningEffortRaw = normalizeReasoningEffort(params?.reasoningEffort);
   const instructions = trim(params?.instructions) || DEFAULT_CODEX_INSTRUCTIONS;
   const workspaceRoot = resolveWorkspaceRoot(params?.workspaceRoot);
+  const workspaceTemplateRoot = resolveWorkspaceTemplateRoot(params?.workspaceTemplateRoot);
   const isFirstTurn = Boolean(params?.isFirstTurn);
 
   const notionApiKey = resolveNotionApiKey(params?.skills);
@@ -2254,7 +2256,7 @@ export async function requestCodexResponse(params) {
   const reasoningEffort = reasoningEffortRaw === "none" ? undefined : reasoningEffortRaw;
 
   try {
-    await ensureWorkspaceScaffold(workspaceRoot);
+    await ensureWorkspaceScaffold(workspaceRoot, workspaceTemplateRoot);
   } catch (error) {
     throw new Error(`Workspace init failed: ${trim(error?.message) || String(error)}`);
   }

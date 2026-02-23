@@ -10,6 +10,8 @@ services:
     tty: true
     environment:
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      CODEXCLAW_WORKSPACE_ROOT: /home/node/.codexclaw/workspace
+      CODEXCLAW_WORKSPACE_TEMPLATE_ROOT: /app/.codexclaw/initial-workspace
     volumes:
       - codexclaw_data:/home/node/.codexclaw
     command: ["sh", "-lc", "sleep infinity"]

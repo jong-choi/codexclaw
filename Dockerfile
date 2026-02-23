@@ -11,6 +11,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY bin ./bin
 COPY src ./src
 COPY README.md ./README.md
+COPY .codexclaw/initial-workspace ./.codexclaw/initial-workspace
 
 RUN mkdir -p /home/node/.codexclaw && chown -R node:node /app /home/node/.codexclaw
 

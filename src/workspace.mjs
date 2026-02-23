@@ -33,9 +33,7 @@ async function copyTemplateContents(templateRoot, workspaceRoot) {
     entries = await fs.readdir(templateRoot, { withFileTypes: true });
   } catch (error) {
     if (error?.code === "ENOENT") {
-      return {
-        copiedEntries: 0,
-      };
+      throw new Error(`Workspace template root not found: ${templateRoot}`);
     }
     throw error;
   }

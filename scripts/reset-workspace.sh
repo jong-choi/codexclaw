@@ -92,7 +92,8 @@ parse_args() {
 
 copy_template_contents() {
   if [[ ! -d "${TEMPLATE_ROOT}" ]]; then
-    return 0
+    echo "Error: template root not found: ${TEMPLATE_ROOT}" >&2
+    exit 1
   fi
   if command -v rsync >/dev/null 2>&1; then
     rsync -a "${TEMPLATE_ROOT}/" "${WORKSPACE_ROOT}/"
@@ -105,6 +106,35 @@ copy_template_contents() {
   if [[ "${#entries[@]}" -gt 0 ]]; then
     cp -R "${entries[@]}" "${WORKSPACE_ROOT}/"
   fi
+}
+
+assert_safe_paths() {
+  if [[ ! -d "${TEMPLATE_ROOT}" ]]; then
+    echo "Error: template root not found: ${TEMPLATE_ROOT}" >&2
+    exit 1
+  fi
+
+  local workspace_parent
+  workspace_parent="$(dirname "${WORKSPACE_ROOT}")"
+  mkdir -p "${workspace_parent}"
+  mkdir -p "${WORKSPACE_ROOT}"
+
+  local workspace_real
+  workspace_real="$(cd "${WORKSPACE_ROOT}" && pwd -P)"
+  local template_real
+  template_real="$(cd "${TEMPLATE_ROOT}" && pwd -P)"
+
+  if [[ "${workspace_real}" == "${template_real}" ]]; then
+    echo "Error: workspace root and template root must be different." >&2
+    exit 1
+  fi
+
+  case "${template_real}" in
+    "${workspace_real}"|${workspace_real}/*)
+      echo "Error: template root must not be inside workspace root." >&2
+      exit 1
+      ;;
+  esac
 }
 
 reset_workspace() {
@@ -123,16 +153,19 @@ reset_workspace() {
     fi
   fi
 
+  assert_safe_paths
   rm -rf "${WORKSPACE_ROOT}"
   mkdir -p "${WORKSPACE_ROOT}"
   copy_template_contents
-  : > "${MEMORY_FILE}"
-  : > "${INSTRUCTIONS_FILE}"
 
   echo "Workspace initialized: ${WORKSPACE_ROOT}"
   echo "Template copied from: ${TEMPLATE_ROOT}"
-  echo "Ensured: ${MEMORY_FILE}"
-  echo "Ensured: ${INSTRUCTIONS_FILE}"
+  if [[ -f "${MEMORY_FILE}" ]]; then
+    echo "Ensured from template: ${MEMORY_FILE}"
+  fi
+  if [[ -f "${INSTRUCTIONS_FILE}" ]]; then
+    echo "Ensured from template: ${INSTRUCTIONS_FILE}"
+  fi
 }
 
 parse_args "$@"

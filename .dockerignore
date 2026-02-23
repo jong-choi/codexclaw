@@ -3,4 +3,5 @@ npm-debug.log*
 .DS_Store
 .git
 .gitignore
-.codexclaw
+.codexclaw/.DS_Store
+.codexclaw/workspace

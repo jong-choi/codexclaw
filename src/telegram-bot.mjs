@@ -27,6 +27,7 @@ import {
   markScheduledJobFailed,
   resolveSecondsUntilNextScheduledJob,
 } from "./schedule-store.mjs";
+import { resolveWorkspaceRoot, resolveWorkspaceTemplateRoot } from "./workspace.mjs";
 
 function trim(value) {
   return String(value ?? "").trim();
@@ -38,6 +39,22 @@ function normalizeCodexModelId(value) {
     return "";
   }
   return LEGACY_CODEX_MODEL_ID_ALIASES[raw] ?? raw;
+}
+
+function resolveRuntimeWorkspaceRoot(config) {
+  const fromEnv = trim(process.env.CODEXCLAW_WORKSPACE_ROOT);
+  if (fromEnv) {
+    return resolveWorkspaceRoot(fromEnv);
+  }
+  return resolveWorkspaceRoot(trim(config?.workspace?.root));
+}
+
+function resolveRuntimeWorkspaceTemplateRoot(config) {
+  const fromEnv = trim(process.env.CODEXCLAW_WORKSPACE_TEMPLATE_ROOT);
+  if (fromEnv) {
+    return resolveWorkspaceTemplateRoot(fromEnv);
+  }
+  return resolveWorkspaceTemplateRoot(trim(config?.workspace?.templateRoot));
 }
 
 function sleep(ms) {
@@ -952,7 +969,8 @@ async function runDueScheduledJobs(params) {
         modelId: params?.modelId,
         reasoningEffort: resolveReasoningEffort(params?.config),
         instructions: params?.codexInstructions,
-        workspaceRoot: trim(params?.config?.workspace?.root),
+        workspaceRoot: resolveRuntimeWorkspaceRoot(params?.config),
+        workspaceTemplateRoot: resolveRuntimeWorkspaceTemplateRoot(params?.config),
         isFirstTurn: false,
         messages: [
           ...history,
@@ -1457,7 +1475,8 @@ export async function runTelegramBot(options = {}) {
             modelId: activeModelId,
             reasoningEffort: resolveReasoningEffort(config),
             instructions: codexInstructions,
-            workspaceRoot: trim(config?.workspace?.root),
+            workspaceRoot: resolveRuntimeWorkspaceRoot(config),
+            workspaceTemplateRoot: resolveRuntimeWorkspaceTemplateRoot(config),
             isFirstTurn: history.length === 0,
             messages: [
               ...history,

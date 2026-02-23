@@ -1,4 +1,3 @@
-import path from "node:path";
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
   BRAVE_API_ENV_NAME,
@@ -8,13 +7,18 @@ import {
   NOTION_API_ENV_NAME,
   NOTION_SKILL_KEY,
   SCHEDULER_SKILL_KEY,
-  WORKSPACE_DEFAULT_ROOT_DIR,
+  WORKSPACE_TEMPLATE_ROOT_DIR,
   WEB_FETCH_SKILL_KEY,
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
 import { loginCodexOAuth } from "./oauth.mjs";
 import { withPrompter } from "./prompt.mjs";
-import { ensureWorkspaceInitialized, inspectWorkspace, resolveWorkspaceRoot } from "./workspace.mjs";
+import {
+  ensureWorkspaceInitialized,
+  inspectWorkspace,
+  resolveWorkspaceRoot,
+  resolveWorkspaceTemplateRoot,
+} from "./workspace.mjs";
 
 function trim(value) {
   return String(value ?? "").trim();
@@ -101,17 +105,34 @@ function resolveSchedulerSkillEnabled(config) {
 }
 
 function resolveConfiguredWorkspaceRoot(config) {
+  const fromEnv = trim(process.env.CODEXCLAW_WORKSPACE_ROOT);
+  if (fromEnv) {
+    return resolveWorkspaceRoot(fromEnv);
+  }
   const fromConfig = trim(config?.workspace?.root);
   if (fromConfig) {
     return resolveWorkspaceRoot(fromConfig);
   }
-  return path.resolve(process.cwd(), WORKSPACE_DEFAULT_ROOT_DIR);
+  return resolveWorkspaceRoot();
+}
+
+function resolveConfiguredWorkspaceTemplateRoot(config) {
+  const fromEnv = trim(process.env.CODEXCLAW_WORKSPACE_TEMPLATE_ROOT);
+  if (fromEnv) {
+    return resolveWorkspaceTemplateRoot(fromEnv);
+  }
+  const fromConfig = trim(config?.workspace?.templateRoot);
+  if (fromConfig) {
+    return resolveWorkspaceTemplateRoot(fromConfig);
+  }
+  return resolveWorkspaceTemplateRoot(WORKSPACE_TEMPLATE_ROOT_DIR);
 }
 
 export async function runOnboard(options = {}) {
   const loaded = await loadConfig(options.configPath);
   const existing = loaded.config ?? {};
   const workspaceRoot = resolveConfiguredWorkspaceRoot(existing);
+  const workspaceTemplateRoot = resolveConfiguredWorkspaceTemplateRoot(existing);
 
   const next = {
     ...existing,
@@ -120,6 +141,7 @@ export async function runOnboard(options = {}) {
     workspace: {
       ...(existing.workspace ?? {}),
       root: workspaceRoot,
+      templateRoot: workspaceTemplateRoot,
     },
     skills: {
       ...(existing.skills ?? {}),
@@ -423,6 +445,7 @@ export async function runOnboard(options = {}) {
 
     const workspaceState = await inspectWorkspace({
       workspaceRoot: next.workspace?.root,
+      templateRoot: next.workspace?.templateRoot,
     });
     let resetWorkspaceFromTemplate = false;
     if (workspaceState.populated) {
@@ -435,6 +458,7 @@ export async function runOnboard(options = {}) {
     const saved = await saveConfig(next, loaded.path);
     const workspaceInit = await ensureWorkspaceInitialized({
       workspaceRoot: saved.config?.workspace?.root,
+      templateRoot: saved.config?.workspace?.templateRoot,
       forceReset: resetWorkspaceFromTemplate,
     });
     const notionEnabled = resolveNotionSkillEnabled(saved.config);
