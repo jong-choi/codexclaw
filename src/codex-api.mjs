@@ -22,10 +22,15 @@ import {
 import {
   cancelScheduledJob,
   createScheduledJob,
+  createRecurringScheduledJob,
+  deleteRecurringScheduledJob,
   formatDateTimeInTimezone,
   isValidSchedulerTimezone,
+  listRecurringScheduledJobs,
   listScheduledJobs,
+  pauseRecurringScheduledJob,
   resolveSchedulerTimezone,
+  resumeRecurringScheduledJob,
 } from "./schedule-store.mjs";
 import { getTelegramChatTimezone, setTelegramChatTimezone } from "./telegram-settings-store.mjs";
 import { ensureWorkspaceInitialized, resolveWorkspaceRoot } from "./workspace.mjs";
@@ -46,6 +51,11 @@ const WORKSPACE_DELETE_TOOL_NAME = "workspace_delete_path";
 const SCHEDULE_CREATE_TOOL_NAME = "schedule_create";
 const SCHEDULE_LIST_TOOL_NAME = "schedule_list";
 const SCHEDULE_DELETE_TOOL_NAME = "schedule_delete";
+const SCHEDULE_RECURRING_CREATE_TOOL_NAME = "schedule_recurring_create";
+const SCHEDULE_RECURRING_LIST_TOOL_NAME = "schedule_recurring_list";
+const SCHEDULE_RECURRING_DELETE_TOOL_NAME = "schedule_recurring_delete";
+const SCHEDULE_RECURRING_PAUSE_TOOL_NAME = "schedule_recurring_pause";
+const SCHEDULE_RECURRING_RESUME_TOOL_NAME = "schedule_recurring_resume";
 const TIMEZONE_GET_TOOL_NAME = "timezone_get";
 const TIMEZONE_SET_TOOL_NAME = "timezone_set";
 const CURRENT_TIME_GET_TOOL_NAME = "current_time_get";
@@ -250,6 +260,117 @@ const SCHEDULE_DELETE_TOOL = {
     jobId: Type.String({
       minLength: 1,
       description: "Scheduled job id from schedule_list.",
+    }),
+  }),
+};
+
+const WEEKDAY_TOKEN_SCHEMA = Type.Union([
+  Type.Literal("MO"),
+  Type.Literal("TU"),
+  Type.Literal("WE"),
+  Type.Literal("TH"),
+  Type.Literal("FR"),
+  Type.Literal("SA"),
+  Type.Literal("SU"),
+]);
+
+const SCHEDULE_RECURRING_CREATE_TOOL = {
+  name: SCHEDULE_RECURRING_CREATE_TOOL_NAME,
+  description:
+    "Create a recurring schedule for the current Telegram chat. The prompt is executed later by Codex, so write it as the exact future instruction.",
+  parameters: Type.Object({
+    prompt: Type.String({
+      minLength: 1,
+      description:
+        "Future instruction for trigger time, not the original scheduling sentence. Example: 'Tell the user to call their mom now.'",
+    }),
+    frequency: Type.Union([Type.Literal("daily"), Type.Literal("weekly")]),
+    hour: Type.Number({
+      minimum: 0,
+      maximum: 23,
+      description: "Local hour in 24h format (0-23).",
+    }),
+    minute: Type.Optional(
+      Type.Number({
+        minimum: 0,
+        maximum: 59,
+        description: "Local minute (0-59). Defaults to 0.",
+      }),
+    ),
+    weekdays: Type.Optional(
+      Type.Array(WEEKDAY_TOKEN_SCHEMA, {
+        minItems: 1,
+        maxItems: 7,
+        uniqueItems: true,
+        description: "Required for weekly frequency. Use MO,TU,WE,TH,FR,SA,SU.",
+      }),
+    ),
+    timezone: Type.Optional(
+      Type.String({
+        description:
+          "Optional IANA timezone override. If omitted, uses this chat timezone (set with timezone_set).",
+      }),
+    ),
+  }),
+};
+
+const SCHEDULE_RECURRING_LIST_TOOL = {
+  name: SCHEDULE_RECURRING_LIST_TOOL_NAME,
+  description: "List recurring schedules for the current Telegram chat.",
+  parameters: Type.Object({
+    state: Type.Optional(
+      Type.Union([
+        Type.Literal("active"),
+        Type.Literal("paused"),
+        Type.Literal("running"),
+        Type.Literal("canceled"),
+        Type.Literal("all"),
+      ]),
+    ),
+    limit: Type.Optional(
+      Type.Number({
+        minimum: 1,
+        maximum: 50,
+        description: "Maximum number of items to return.",
+      }),
+    ),
+    timezone: Type.Optional(
+      Type.String({
+        description: "Display timezone for returned local times (IANA).",
+      }),
+    ),
+  }),
+};
+
+const SCHEDULE_RECURRING_DELETE_TOOL = {
+  name: SCHEDULE_RECURRING_DELETE_TOOL_NAME,
+  description: "Delete (cancel) one recurring schedule by recurring id for the current Telegram chat.",
+  parameters: Type.Object({
+    recurringId: Type.String({
+      minLength: 1,
+      description: "Recurring schedule id from schedule_recurring_list.",
+    }),
+  }),
+};
+
+const SCHEDULE_RECURRING_PAUSE_TOOL = {
+  name: SCHEDULE_RECURRING_PAUSE_TOOL_NAME,
+  description: "Pause one recurring schedule by recurring id for the current Telegram chat.",
+  parameters: Type.Object({
+    recurringId: Type.String({
+      minLength: 1,
+      description: "Recurring schedule id from schedule_recurring_list.",
+    }),
+  }),
+};
+
+const SCHEDULE_RECURRING_RESUME_TOOL = {
+  name: SCHEDULE_RECURRING_RESUME_TOOL_NAME,
+  description: "Resume one paused recurring schedule by recurring id for the current Telegram chat.",
+  parameters: Type.Object({
+    recurringId: Type.String({
+      minLength: 1,
+      description: "Recurring schedule id from schedule_recurring_list.",
     }),
   }),
 };
@@ -571,10 +692,16 @@ function buildSkillsPrompt({
   }
   if (schedulerEnabled) {
     lines.push(
-      `For reminders/scheduling, use tools \`${SCHEDULE_CREATE_TOOL_NAME}\`, \`${SCHEDULE_LIST_TOOL_NAME}\`, \`${SCHEDULE_DELETE_TOOL_NAME}\`.`,
+      `For one-time reminders, use \`${SCHEDULE_CREATE_TOOL_NAME}\`, \`${SCHEDULE_LIST_TOOL_NAME}\`, \`${SCHEDULE_DELETE_TOOL_NAME}\`.`,
+    );
+    lines.push(
+      `For recurring reminders, use \`${SCHEDULE_RECURRING_CREATE_TOOL_NAME}\`, \`${SCHEDULE_RECURRING_LIST_TOOL_NAME}\`, \`${SCHEDULE_RECURRING_DELETE_TOOL_NAME}\`, \`${SCHEDULE_RECURRING_PAUSE_TOOL_NAME}\`, \`${SCHEDULE_RECURRING_RESUME_TOOL_NAME}\`.`,
     );
     lines.push(
       "Important: schedule_create.prompt is executed later as a new Codex request. Write it as the exact future instruction.",
+    );
+    lines.push(
+      "Important: schedule_recurring_create.prompt follows the same rule. It must be the exact future instruction.",
     );
     lines.push(
       "Do not copy the user's scheduling sentence into prompt. Rewrite it into what future Codex should do.",
@@ -585,7 +712,11 @@ function buildSkillsPrompt({
     lines.push(
       "Few-shot: user='Remind me in 10 minutes to drink water' -> schedule_create.prompt='Tell the user to drink water now.'",
     );
+    lines.push(
+      "Few-shot: user='Every Monday at 8 PM remind me to send a weekly report' -> schedule_recurring_create.prompt='Tell the user to send their weekly report now.'",
+    );
     lines.push("For relative requests (e.g. 'in 3 minutes'), prefer delaySeconds.");
+    lines.push("For recurring local times, use frequency/hour/minute and weekdays (for weekly).");
     lines.push(
       "For absolute local times, provide runAt plus timezone (IANA) unless runAt already includes timezone offset.",
     );
@@ -1121,6 +1252,38 @@ function resolveToolTarget(toolName, args) {
     return {
       method: "DELETE",
       path: truncateToolPath(trim(args?.jobId)),
+    };
+  }
+  if (toolName === SCHEDULE_RECURRING_CREATE_TOOL_NAME) {
+    return {
+      method: "CREATE",
+      path: truncateToolPath(
+        `${trim(args?.frequency) || "?"} ${String(args?.hour ?? "?")}:${String(args?.minute ?? 0)}`,
+      ),
+    };
+  }
+  if (toolName === SCHEDULE_RECURRING_LIST_TOOL_NAME) {
+    return {
+      method: "LIST",
+      path: truncateToolPath(trim(args?.state) || "all"),
+    };
+  }
+  if (toolName === SCHEDULE_RECURRING_DELETE_TOOL_NAME) {
+    return {
+      method: "DELETE",
+      path: truncateToolPath(trim(args?.recurringId)),
+    };
+  }
+  if (toolName === SCHEDULE_RECURRING_PAUSE_TOOL_NAME) {
+    return {
+      method: "PAUSE",
+      path: truncateToolPath(trim(args?.recurringId)),
+    };
+  }
+  if (toolName === SCHEDULE_RECURRING_RESUME_TOOL_NAME) {
+    return {
+      method: "RESUME",
+      path: truncateToolPath(trim(args?.recurringId)),
     };
   }
   if (toolName === TIMEZONE_GET_TOOL_NAME) {
@@ -1788,6 +1951,143 @@ async function executeScheduleDeleteToolCall(params) {
   }
 }
 
+async function executeScheduleRecurringCreateToolCall(params) {
+  const runtime = resolveRuntimeScheduleContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  try {
+    return await createRecurringScheduledJob({
+      customConfigPath: params?.configPath,
+      channel: runtime.channel,
+      chatId: runtime.chatId,
+      sessionId: runtime.sessionId,
+      prompt: params?.prompt,
+      frequency: params?.frequency,
+      weekdays: params?.weekdays,
+      hour: params?.hour,
+      minute: params?.minute,
+      timezone: params?.timezone,
+      defaultTimezone: params?.defaultTimezone,
+      displayTimezone: params?.displayTimezone,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeScheduleRecurringListToolCall(params) {
+  const runtime = resolveRuntimeScheduleContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  try {
+    return await listRecurringScheduledJobs({
+      customConfigPath: params?.configPath,
+      channel: runtime.channel,
+      chatId: runtime.chatId,
+      state: params?.state,
+      limit: params?.limit,
+      defaultTimezone: params?.defaultTimezone,
+      displayTimezone: params?.timezone,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeScheduleRecurringDeleteToolCall(params) {
+  const runtime = resolveRuntimeScheduleContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  try {
+    return await deleteRecurringScheduledJob({
+      customConfigPath: params?.configPath,
+      channel: runtime.channel,
+      chatId: runtime.chatId,
+      recurringId: params?.recurringId,
+      defaultTimezone: params?.defaultTimezone,
+      displayTimezone: params?.defaultTimezone,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeScheduleRecurringPauseToolCall(params) {
+  const runtime = resolveRuntimeScheduleContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  try {
+    return await pauseRecurringScheduledJob({
+      customConfigPath: params?.configPath,
+      channel: runtime.channel,
+      chatId: runtime.chatId,
+      recurringId: params?.recurringId,
+      defaultTimezone: params?.defaultTimezone,
+      displayTimezone: params?.defaultTimezone,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
+async function executeScheduleRecurringResumeToolCall(params) {
+  const runtime = resolveRuntimeScheduleContext(params);
+  if (!runtime.ok) {
+    return {
+      ok: false,
+      error: runtime.error,
+    };
+  }
+
+  try {
+    return await resumeRecurringScheduledJob({
+      customConfigPath: params?.configPath,
+      channel: runtime.channel,
+      chatId: runtime.chatId,
+      recurringId: params?.recurringId,
+      defaultTimezone: params?.defaultTimezone,
+      displayTimezone: params?.defaultTimezone,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: trim(error?.message) || String(error),
+    };
+  }
+}
+
 function validateAssistantResponse(response) {
   if (!response || typeof response !== "object") {
     throw new Error("Codex API returned an invalid response.");
@@ -2024,6 +2324,77 @@ export async function requestCodexResponse(params) {
     enabledTools.push(SCHEDULE_DELETE_TOOL);
     toolHandlers.set(SCHEDULE_DELETE_TOOL_NAME, async (rawArgs) =>
       executeScheduleDeleteToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+        defaultTimezone: schedulerTimezone,
+      }),
+    );
+
+    enabledTools.push(SCHEDULE_RECURRING_CREATE_TOOL);
+    toolHandlers.set(SCHEDULE_RECURRING_CREATE_TOOL_NAME, async (rawArgs) =>
+      executeScheduleRecurringCreateToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+        defaultTimezone: schedulerTimezone,
+        displayTimezone: schedulerTimezone,
+      }),
+    );
+
+    enabledTools.push(SCHEDULE_RECURRING_LIST_TOOL);
+    toolHandlers.set(SCHEDULE_RECURRING_LIST_TOOL_NAME, async (rawArgs) =>
+      executeScheduleRecurringListToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+        defaultTimezone: schedulerTimezone,
+      }),
+    );
+
+    enabledTools.push(SCHEDULE_RECURRING_DELETE_TOOL);
+    toolHandlers.set(SCHEDULE_RECURRING_DELETE_TOOL_NAME, async (rawArgs) =>
+      executeScheduleRecurringDeleteToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+        defaultTimezone: schedulerTimezone,
+      }),
+    );
+
+    enabledTools.push(SCHEDULE_RECURRING_PAUSE_TOOL);
+    toolHandlers.set(SCHEDULE_RECURRING_PAUSE_TOOL_NAME, async (rawArgs) =>
+      executeScheduleRecurringPauseToolCall({
+        ...rawArgs,
+        runtime: {
+          channel: runtimeChannel,
+          chatId: runtimeChatId,
+          sessionId: runtimeSessionId,
+        },
+        configPath: params?.configPath,
+        defaultTimezone: schedulerTimezone,
+      }),
+    );
+
+    enabledTools.push(SCHEDULE_RECURRING_RESUME_TOOL);
+    toolHandlers.set(SCHEDULE_RECURRING_RESUME_TOOL_NAME, async (rawArgs) =>
+      executeScheduleRecurringResumeToolCall({
         ...rawArgs,
         runtime: {
           channel: runtimeChannel,

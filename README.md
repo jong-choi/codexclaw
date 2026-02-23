@@ -135,9 +135,14 @@ Scheduler (optional):
 - `schedule_create`: delay-based or absolute time scheduling
 - `schedule_list`: inspect current registered jobs
 - `schedule_delete`: cancel one job
+- `schedule_recurring_create`: recurring reminder registration (`daily`/`weekly`)
+- `schedule_recurring_list`: inspect registered recurring reminders
+- `schedule_recurring_delete`: cancel one recurring reminder
+- `schedule_recurring_pause`: pause one recurring reminder
+- `schedule_recurring_resume`: resume one paused recurring reminder
 - Chat timezone tools: `timezone_get`, `timezone_set`, `current_time_get`
 - Timezone is configured during Telegram chat (`timezone_set`), not during onboarding.
-- `schedule_create.prompt` should be a future instruction, not the original scheduling sentence.
+- `schedule_create.prompt` and `schedule_recurring_create.prompt` should be future instructions, not original scheduling sentences.
   Example: `Schedule a reminder for 8 AM tomorrow to call my mom` -> `Tell the user to call their mom now.`
 - Scheduled tasks are chat-scoped and trigger a new Codex run when due.
 
