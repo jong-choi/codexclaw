@@ -1,9 +1,11 @@
 # codexclaw
 
-Most of this code was written with GPT-5.3-Codex-xhigh.
-This project is focused on Codex + Telegram integration.
-This project was created by extracting only the parts I needed from the much larger OpenClaw project.
-OpenClaw is released under the MIT License ([openclaw/openclaw](https://github.com/openclaw/openclaw)) and yes, this project is too.
+[English](README.md) | [한국어](docs/README.ko.md) | [日本語](docs/README.ja.md)
+
+Most of this code was written with GPT-5.3-Codex-xhigh, so you can keep editing and iterating with Codex too. 
+This project is focused on Codex + Telegram integration. 
+This project was created by extracting only the parts I needed from the much larger OpenClaw project. 
+OpenClaw is released under the MIT License ([openclaw/openclaw](https://github.com/openclaw/openclaw)) and yes, this project is too. 
 
 Minimal onboarding + runtime for:
 
