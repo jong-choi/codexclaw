@@ -22,25 +22,25 @@ Minimal onboarding + runtime for:
 <table>
   <tr>
     <td align="center" width="50%">
-      <a href="docs/images/telegram-chat-01.jpeg">
-        <img src="docs/images/telegram-chat-01.jpeg" width="260" alt="Telegram chat 01" />
+      <a href="docs/images/telegram-chat-01.jpg">
+        <img src="docs/images/telegram-chat-01.jpg" width="260" alt="Telegram chat 01" />
       </a>
     </td>
     <td align="center" width="50%">
-      <a href="docs/images/telegram-chat-02.jpeg">
-        <img src="docs/images/telegram-chat-02.jpeg" width="260" alt="Telegram chat 02" />
+      <a href="docs/images/telegram-chat-02.jpg">
+        <img src="docs/images/telegram-chat-02.jpg" width="260" alt="Telegram chat 02" />
       </a>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
-      <a href="docs/images/telegram-chat-03.jpeg">
-        <img src="docs/images/telegram-chat-03.jpeg" width="260" alt="Telegram chat 03" />
+      <a href="docs/images/telegram-chat-03.jpg">
+        <img src="docs/images/telegram-chat-03.jpg" width="260" alt="Telegram chat 03" />
       </a>
     </td>
     <td align="center" width="50%">
-      <a href="docs/images/telegram-chat-04.jpeg">
-        <img src="docs/images/telegram-chat-04.jpeg" width="260" alt="Telegram chat 04" />
+      <a href="docs/images/telegram-chat-04.jpg">
+        <img src="docs/images/telegram-chat-04.jpg" width="260" alt="Telegram chat 04" />
       </a>
     </td>
   </tr>
