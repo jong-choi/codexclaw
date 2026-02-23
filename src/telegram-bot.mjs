@@ -152,11 +152,22 @@ async function telegramApi(token, method, body) {
     body: JSON.stringify(body ?? {}),
   });
 
-  if (!response.ok) {
-    throw new Error(`Telegram HTTP error (${response.status})`);
+  let payload = null;
+  let rawText = "";
+  try {
+    rawText = await response.text();
+    payload = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    payload = null;
   }
 
-  const payload = await response.json();
+  if (!response.ok) {
+    const description = trim(payload?.description) || trim(rawText);
+    throw new Error(
+      `Telegram HTTP error (${response.status})${description ? `: ${description}` : ""}`,
+    );
+  }
+
   if (!payload?.ok) {
     throw new Error(`Telegram API error: ${trim(payload?.description) || "unknown"}`);
   }
@@ -187,6 +198,12 @@ async function getUpdates(token, offset) {
     timeout: 30,
     offset,
     allowed_updates: ["message"],
+  });
+}
+
+async function clearWebhook(token) {
+  return await telegramApi(token, "deleteWebhook", {
+    drop_pending_updates: false,
   });
 }
 
@@ -239,6 +256,7 @@ export async function runTelegramBot(options = {}) {
   }
   let offset = Number(config?.telegram?.offset ?? 0);
   const codexInstructions = trim(config?.codex?.instructions);
+  let triedWebhookReset = false;
 
   process.stdout.write(`CodexClaw Telegram bot is running.\n`);
   process.stdout.write(`Model: openai-codex/${modelId}\n`);
@@ -339,6 +357,7 @@ export async function runTelegramBot(options = {}) {
             modelId,
             instructions: codexInstructions,
             message: text,
+            skills: config?.skills,
           });
 
           await sendMessage(botToken, chatId, response.text);
@@ -357,7 +376,34 @@ export async function runTelegramBot(options = {}) {
       };
       await saveConfig(config, configPath);
     } catch (error) {
-      process.stderr.write(`Polling error: ${trim(error?.message) || String(error)}\n`);
+      const message = trim(error?.message) || String(error);
+
+      if (
+        !triedWebhookReset &&
+        /telegram http error \(409\)/i.test(message) &&
+        /webhook/i.test(message)
+      ) {
+        triedWebhookReset = true;
+        process.stderr.write(
+          "Polling conflict: webhook is active. Trying to disable webhook for long polling...\n",
+        );
+        try {
+          await clearWebhook(botToken);
+          process.stderr.write("Webhook disabled. Retrying polling.\n");
+          continue;
+        } catch (hookError) {
+          process.stderr.write(
+            `Webhook disable failed: ${trim(hookError?.message) || String(hookError)}\n`,
+          );
+        }
+      }
+
+      if (/telegram http error \(409\)/i.test(message)) {
+        process.stderr.write(
+          "Polling conflict (409): another bot instance may already be polling this token.\n",
+        );
+      }
+      process.stderr.write(`Polling error: ${message}\n`);
       await sleep(3_000);
     }
   }

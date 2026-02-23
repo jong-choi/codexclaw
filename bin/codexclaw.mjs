@@ -16,7 +16,7 @@ function printHelp() {
       "  tele-codex config show [--config <path>]",
       "",
       "Notes:",
-      "  - onboard: OAuth + model select + telegram setup",
+      "  - onboard: OAuth + model select + telegram setup + optional Notion skill key",
       "  - telegram run: start long-polling bot",
     ].join("\n"),
   );
@@ -64,6 +64,16 @@ function redactConfig(config) {
   }
   if (next?.codex?.oauth?.refresh) {
     next.codex.oauth.refresh = maskSecret(next.codex.oauth.refresh);
+  }
+  if (next?.skills?.entries && typeof next.skills.entries === "object") {
+    for (const [skillKey, entry] of Object.entries(next.skills.entries)) {
+      if (entry && typeof entry === "object" && "apiKey" in entry && entry.apiKey) {
+        next.skills.entries[skillKey] = {
+          ...entry,
+          apiKey: maskSecret(entry.apiKey),
+        };
+      }
+    }
   }
   return next;
 }

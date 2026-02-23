@@ -22,3 +22,8 @@ export const CONFIG_DIR_NAME = ".codexclaw";
 export const CONFIG_FILE_NAME = "config.json";
 
 export const CONFIG_VERSION = 1;
+
+export const NOTION_SKILL_KEY = "notion";
+export const NOTION_API_ENV_NAME = "NOTION_API_KEY";
+export const NOTION_API_BASE_URL = "https://api.notion.com";
+export const NOTION_API_VERSION = "2025-09-03";
