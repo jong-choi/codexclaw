@@ -9,12 +9,21 @@ import {
 } from "./conversation-store.mjs";
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
-  CODEX_MODEL_IDS,
-  CODEX_PROVIDER_ID,
-  LEGACY_CODEX_MODEL_ID_ALIASES,
   TELEGRAM_API_BASE_URL,
 } from "./constants.mjs";
-import { resolveFreshCodexAccessToken } from "./oauth.mjs";
+import {
+  assignModelSelection,
+  assignProviderOAuth,
+  ensureProviderState,
+  normalizeProviderModelId,
+  providerSupportsUsageSnapshot,
+  resolveConfiguredProviderId,
+  resolveModelRef,
+  resolveProviderModelIds,
+  resolveProviderOAuth,
+  resolveProviderShortLabel,
+} from "./model-provider.mjs";
+import { resolveFreshProviderAccessToken } from "./oauth.mjs";
 import { buildPairingReply } from "./pairing-messages.mjs";
 import {
   approveChannelPairingCode,
@@ -31,14 +40,6 @@ import { resolveWorkspaceRoot, resolveWorkspaceTemplateRoot } from "./workspace.
 
 function trim(value) {
   return String(value ?? "").trim();
-}
-
-function normalizeCodexModelId(value) {
-  const raw = trim(value);
-  if (!raw) {
-    return "";
-  }
-  return LEGACY_CODEX_MODEL_ID_ALIASES[raw] ?? raw;
 }
 
 function resolveRuntimeWorkspaceRoot(config) {
@@ -73,9 +74,9 @@ const TELEGRAM_BOT_COMMANDS = [
   { command: "help", description: "Show available commands" },
   { command: "new", description: "Reset context for this chat" },
   { command: "context", description: "Show stored context message count" },
-  { command: "usage", description: "Show Codex usage limits (5h/week)" },
+  { command: "usage", description: "Show usage limits (Codex only)" },
   { command: "think", description: "Show or set reasoning effort" },
-  { command: "models", description: "List available Codex models" },
+  { command: "models", description: "List available models for current provider" },
   { command: "model", description: "Show or switch model (/model <id|number>)" },
 ];
 
@@ -319,27 +320,6 @@ async function syncTelegramCommandMenu(token) {
   });
 }
 
-function resolveModelId(config) {
-  const fromStructured = normalizeCodexModelId(config?.codex?.model?.id);
-  if (fromStructured) {
-    return fromStructured;
-  }
-
-  const ref = trim(config?.codex?.model?.ref);
-  if (!ref) {
-    return "";
-  }
-  const slash = ref.indexOf("/");
-  if (slash < 0) {
-    return ref;
-  }
-  return normalizeCodexModelId(ref.slice(slash + 1));
-}
-
-function resolveModelRef(modelId) {
-  return `${CODEX_PROVIDER_ID}/${trim(modelId)}`;
-}
-
 function normalizeReasoningEffort(value) {
   const raw = trim(value).toLowerCase();
   if (!raw) {
@@ -581,11 +561,18 @@ function buildUsageReport(snapshot) {
   return formatCodexUsageLines(snapshot).join("\n");
 }
 
-function buildModelStatusMessage(config, modelId, usageLines) {
-  const lines = Array.isArray(usageLines) && usageLines.length > 0 ? usageLines : ["Codex usage limits", "- unavailable"];
+function buildModelStatusMessage(config, providerId, modelId, usageLines) {
+  const providerShortLabel = resolveProviderShortLabel(providerId);
+  const lines =
+    Array.isArray(usageLines) && usageLines.length > 0
+      ? usageLines
+      : providerSupportsUsageSnapshot(providerId)
+        ? ["Codex usage limits", "- unavailable"]
+        : [`${providerShortLabel} usage limits`, "- unavailable (not provided by this API)."];
   const reasoningEffort = resolveReasoningEffort(config);
   return [
-    `Current model: ${resolveModelRef(modelId)}`,
+    `Current provider: ${providerShortLabel}`,
+    `Current model: ${resolveModelRef(providerId, modelId)}`,
     `Reasoning effort: ${reasoningEffort}`,
     "",
     ...lines,
@@ -595,14 +582,12 @@ function buildModelStatusMessage(config, modelId, usageLines) {
   ].join("\n");
 }
 
-async function resolveFreshCodexSessionAccess(params) {
-  const fresh = await resolveFreshCodexAccessToken(params?.oauth);
+async function resolveFreshProviderSessionAccess(params) {
+  const providerId = trim(params?.providerId) || resolveConfiguredProviderId(params?.config);
+  const fresh = await resolveFreshProviderAccessToken(providerId, params?.oauth);
   const oauth = fresh.credentials;
   if (fresh.changed) {
-    params.config.codex = {
-      ...params.config.codex,
-      oauth,
-    };
+    assignProviderOAuth(params.config, providerId, oauth);
     params.config.telegram = {
       ...params.config.telegram,
       offset: params.offset,
@@ -615,21 +600,25 @@ async function resolveFreshCodexSessionAccess(params) {
   };
 }
 
-function buildModelListMessage(currentModelId) {
-  const normalizedCurrent = normalizeCodexModelId(currentModelId);
-  const lines = ["Available Codex models:"];
-  for (let i = 0; i < CODEX_MODEL_IDS.length; i += 1) {
-    const modelId = CODEX_MODEL_IDS[i];
+function buildModelListMessage(providerId, currentModelId) {
+  const modelIds = resolveProviderModelIds(providerId);
+  const providerShortLabel = resolveProviderShortLabel(providerId);
+  const normalizedCurrent = normalizeProviderModelId(providerId, currentModelId);
+  const lines = [`Available ${providerShortLabel} models:`];
+  for (let i = 0; i < modelIds.length; i += 1) {
+    const modelId = modelIds[i];
     const current = modelId === normalizedCurrent ? " (current)" : "";
-    lines.push(`${i + 1}. ${resolveModelRef(modelId)}${current}`);
+    lines.push(`${i + 1}. ${resolveModelRef(providerId, modelId)}${current}`);
   }
   lines.push("");
   lines.push("Use /model <id|number> to switch.");
-  lines.push("Examples: /model 3, /model gpt-5.3-codex");
+  const firstExample = modelIds[0] ? `/model ${modelIds[0]}` : "/model <id>";
+  lines.push(`Examples: /model 1, ${firstExample}`);
   return lines.join("\n");
 }
 
-function resolveModelSelection(value) {
+function resolveModelSelection(providerId, value) {
+  const modelIds = resolveProviderModelIds(providerId);
   const raw = trim(value).toLowerCase();
   if (!raw) {
     return "";
@@ -637,18 +626,24 @@ function resolveModelSelection(value) {
 
   if (/^\d+$/.test(raw)) {
     const index = Number.parseInt(raw, 10);
-    if (Number.isInteger(index) && index >= 1 && index <= CODEX_MODEL_IDS.length) {
-      return CODEX_MODEL_IDS[index - 1];
+    if (Number.isInteger(index) && index >= 1 && index <= modelIds.length) {
+      return modelIds[index - 1];
     }
     return "";
   }
 
   let candidate = raw;
   if (candidate.includes("/")) {
-    candidate = candidate.slice(candidate.lastIndexOf("/") + 1);
+    const slash = candidate.indexOf("/");
+    const maybeProvider = trim(candidate.slice(0, slash));
+    if (maybeProvider === providerId) {
+      candidate = trim(candidate.slice(slash + 1));
+    } else {
+      candidate = candidate.slice(candidate.lastIndexOf("/") + 1);
+    }
   }
-  const normalized = normalizeCodexModelId(candidate);
-  if (CODEX_MODEL_IDS.includes(normalized)) {
+  const normalized = normalizeProviderModelId(providerId, candidate);
+  if (modelIds.includes(normalized)) {
     return normalized;
   }
   return "";
@@ -703,17 +698,20 @@ function isKnownChatCommand(token) {
   );
 }
 
-function buildHelpMessage() {
+function buildHelpMessage(providerId) {
+  const providerShortLabel = resolveProviderShortLabel(providerId);
+  const providerModelIds = resolveProviderModelIds(providerId);
+  const exampleModel = providerModelIds[0] || "<id>";
   return [
     "CodexClaw Telegram commands",
     "",
     "/help - Show this command guide.",
     "/new (/clear, /reset) - Reset context for this chat.",
     "/context - Show stored context message count.",
-    "/usage - Show live Codex usage limits (5h/week).",
+    "/usage - Show live usage limits (Codex only).",
     "/think <level> - Set reasoning effort.",
-    "/models - List available models.",
-    "/model - Show current model + reasoning + usage limit summary.",
+    "/models - List available models for current provider.",
+    `/model - Show current provider/model (${providerShortLabel}) + reasoning + usage summary.`,
     "/model <id|number> - Switch model immediately.",
     "",
     `Reasoning levels: ${REASONING_EFFORT_LEVELS.join(", ")}`,
@@ -721,8 +719,8 @@ function buildHelpMessage() {
     "",
     "Examples:",
     "/think medium",
-    "/model 3",
-    "/model gpt-5.3-codex",
+    "/model 1",
+    `/model ${exampleModel}`,
     "",
     "If a command fails, run /help and follow the exact format above.",
   ].join("\n");
@@ -951,14 +949,11 @@ async function runDueScheduledJobs(params) {
 
     try {
       await sendTyping(params?.botToken, chatId).catch(() => {});
-      const fresh = await resolveFreshCodexAccessToken(oauth);
+      const fresh = await resolveFreshProviderAccessToken(params?.providerId, oauth);
       oauth = fresh.credentials;
 
       if (fresh.changed) {
-        params.config.codex = {
-          ...params.config.codex,
-          oauth,
-        };
+        assignProviderOAuth(params.config, params?.providerId, oauth);
         await saveConfig(params.config, params.configPath);
       }
 
@@ -966,6 +961,7 @@ async function runDueScheduledJobs(params) {
       const history = getConversationHistory(conversationStore, sessionId);
       const response = await requestCodexResponse({
         accessToken: fresh.accessToken,
+        providerId: params?.providerId,
         modelId: params?.modelId,
         reasoningEffort: resolveReasoningEffort(params?.config),
         instructions: params?.codexInstructions,
@@ -1037,14 +1033,20 @@ export async function runTelegramBot(options = {}) {
     throw new Error("telegram.botToken is missing. Run `codexclaw onboard`.");
   }
 
-  let activeModelId = resolveModelId(config);
-  if (!activeModelId) {
-    throw new Error("codex.model is missing. Run `codexclaw onboard`.");
+  const providerState = ensureProviderState(config);
+  if (providerState.changed) {
+    await saveConfig(config, configPath);
   }
 
-  let oauth = config?.codex?.oauth;
+  let activeProviderId = providerState.providerId;
+  let activeModelId = providerState.modelId;
+  if (!activeModelId) {
+    throw new Error("model selection is missing. Run `codexclaw onboard`.");
+  }
+
+  let oauth = resolveProviderOAuth(config, activeProviderId);
   if (!oauth || typeof oauth !== "object") {
-    throw new Error("codex.oauth is missing. Run `codexclaw onboard`.");
+    throw new Error(`${resolveProviderShortLabel(activeProviderId)} OAuth is missing. Run \`codexclaw onboard\`.`);
   }
 
   const dmPolicy = trim(config?.telegram?.dmPolicy || "pairing").toLowerCase();
@@ -1073,7 +1075,10 @@ export async function runTelegramBot(options = {}) {
   };
 
   process.stdout.write(`CodexClaw Telegram bot is running.\n`);
-  process.stdout.write(`Model: ${resolveModelRef(activeModelId)}\n`);
+  process.stdout.write(
+    `Provider: ${resolveProviderShortLabel(activeProviderId)} (${activeProviderId})\n`,
+  );
+  process.stdout.write(`Model: ${resolveModelRef(activeProviderId, activeModelId)}\n`);
   process.stdout.write(`DM policy: ${dmPolicy}\n`);
   process.stdout.write(`Proactive status: ${proactiveStatusEnabled ? "on" : "off"}\n`);
   process.stdout.write(`Conversation store: ${conversationState.path}\n`);
@@ -1097,6 +1102,7 @@ export async function runTelegramBot(options = {}) {
       let conversationStoreDirty = false;
       const scheduledRun = await runDueScheduledJobs({
         botToken,
+        providerId: activeProviderId,
         modelId: activeModelId,
         codexInstructions,
         config,
@@ -1190,15 +1196,16 @@ export async function runTelegramBot(options = {}) {
         }
 
         if (command === "/start") {
+          const providerLabel = resolveProviderShortLabel(activeProviderId);
           await sendMessage(
             botToken,
             chatId,
             [
-              "CodexClaw is connected. Send a message to talk to Codex.",
+              `CodexClaw is connected. Send a message to talk to ${providerLabel}.`,
               "Use /help to see all available commands.",
               "Use /new to reset context for this chat.",
               "Use /context to inspect stored context size.",
-              "Use /usage to inspect Codex 5h/week usage limits.",
+              "Use /usage to inspect usage limits (Codex only).",
               "Use /think to inspect or set reasoning effort.",
               "Use /models to list models, /model to inspect current model.",
             ].join("\n"),
@@ -1207,7 +1214,7 @@ export async function runTelegramBot(options = {}) {
         }
 
         if (isHelpCommand(command)) {
-          await sendMessage(botToken, chatId, buildHelpMessage());
+          await sendMessage(botToken, chatId, buildHelpMessage(activeProviderId));
           continue;
         }
 
@@ -1255,8 +1262,17 @@ export async function runTelegramBot(options = {}) {
             );
             continue;
           }
+          if (!providerSupportsUsageSnapshot(activeProviderId)) {
+            await sendMessage(
+              botToken,
+              chatId,
+              `${resolveProviderShortLabel(activeProviderId)} usage API is not available in this runtime.`,
+            );
+            continue;
+          }
           try {
-            const fresh = await resolveFreshCodexSessionAccess({
+            const fresh = await resolveFreshProviderSessionAccess({
+              providerId: activeProviderId,
               oauth,
               config,
               configPath,
@@ -1272,7 +1288,7 @@ export async function runTelegramBot(options = {}) {
             await sendMessage(
               botToken,
               chatId,
-              `Codex usage lookup failed: ${trim(error?.message) || "unknown error"}`,
+              `Usage lookup failed: ${trim(error?.message) || "unknown error"}`,
             );
           }
           continue;
@@ -1327,39 +1343,51 @@ export async function runTelegramBot(options = {}) {
             );
             continue;
           }
-          await sendMessage(botToken, chatId, buildModelListMessage(activeModelId));
+          await sendMessage(botToken, chatId, buildModelListMessage(activeProviderId, activeModelId));
           continue;
         }
 
         if (command === "/model") {
           const arg = resolveCommandArgs(text);
           if (!arg) {
-            let usageLines = ["Codex usage limits", "", "- unavailable"];
-            try {
-              const fresh = await resolveFreshCodexSessionAccess({
-                oauth,
-                config,
-                configPath,
-                offset,
-              });
-              oauth = fresh.oauth;
-              const snapshot = await fetchCodexUsageSnapshot({
-                accessToken: fresh.accessToken,
-                oauthCredentials: oauth,
-              });
-              usageLines = formatCodexUsageLines(snapshot);
-            } catch (error) {
-              usageLines = [
-                "Codex usage limits",
-                "",
-                `- unavailable (${trim(error?.message) || "unknown error"})`,
-              ];
+            let usageLines = [
+              `${resolveProviderShortLabel(activeProviderId)} usage limits`,
+              "",
+              "- unavailable (not provided by this API).",
+            ];
+            if (providerSupportsUsageSnapshot(activeProviderId)) {
+              try {
+                const fresh = await resolveFreshProviderSessionAccess({
+                  providerId: activeProviderId,
+                  oauth,
+                  config,
+                  configPath,
+                  offset,
+                });
+                oauth = fresh.oauth;
+                const snapshot = await fetchCodexUsageSnapshot({
+                  accessToken: fresh.accessToken,
+                  oauthCredentials: oauth,
+                });
+                usageLines = formatCodexUsageLines(snapshot);
+              } catch (error) {
+                usageLines = [
+                  "Codex usage limits",
+                  "",
+                  `- unavailable (${trim(error?.message) || "unknown error"})`,
+                ];
+              }
             }
-            await sendMessage(botToken, chatId, buildModelStatusMessage(config, activeModelId, usageLines));
+            await sendMessage(
+              botToken,
+              chatId,
+              buildModelStatusMessage(config, activeProviderId, activeModelId, usageLines),
+            );
             continue;
           }
-          const selectedModelId = resolveModelSelection(arg);
+          const selectedModelId = resolveModelSelection(activeProviderId, arg);
           if (!selectedModelId) {
+            const providerModelIds = resolveProviderModelIds(activeProviderId);
             await sendMessage(
               botToken,
               chatId,
@@ -1367,29 +1395,29 @@ export async function runTelegramBot(options = {}) {
                 `Unknown model: ${trim(arg)}`,
                 "Usage: /model <id|number>",
                 "Use /models to see valid options.",
-                "Examples: /model 3, /model gpt-5.3-codex",
+                `Examples: /model 1, /model ${providerModelIds[0] || "<id>"}`,
               ].join("\n"),
             );
             continue;
           }
           if (selectedModelId === activeModelId) {
-            await sendMessage(botToken, chatId, `Model unchanged: ${resolveModelRef(activeModelId)}`);
+            await sendMessage(
+              botToken,
+              chatId,
+              `Model unchanged: ${resolveModelRef(activeProviderId, activeModelId)}`,
+            );
             continue;
           }
           activeModelId = selectedModelId;
-          config.codex = {
-            ...(config.codex ?? {}),
-            model: {
-              id: selectedModelId,
-              ref: resolveModelRef(selectedModelId),
-            },
-          };
+          assignModelSelection(config, activeProviderId, selectedModelId);
           await saveConfig(config, configPath);
-          process.stdout.write(`Model switched to ${resolveModelRef(activeModelId)}.\n`);
+          process.stdout.write(
+            `Model switched to ${resolveModelRef(activeProviderId, activeModelId)}.\n`,
+          );
           await sendMessage(
             botToken,
             chatId,
-            `Model updated: ${resolveModelRef(activeModelId)}`,
+            `Model updated: ${resolveModelRef(activeProviderId, activeModelId)}`,
           );
           continue;
         }
@@ -1453,14 +1481,11 @@ export async function runTelegramBot(options = {}) {
         }
 
         try {
-          const fresh = await resolveFreshCodexAccessToken(oauth);
+          const fresh = await resolveFreshProviderAccessToken(activeProviderId, oauth);
           oauth = fresh.credentials;
 
           if (fresh.changed) {
-            config.codex = {
-              ...config.codex,
-              oauth,
-            };
+            assignProviderOAuth(config, activeProviderId, oauth);
             config.telegram = {
               ...config.telegram,
               offset,
@@ -1472,6 +1497,7 @@ export async function runTelegramBot(options = {}) {
           const history = getConversationHistory(conversationStore, sessionId);
           const response = await requestCodexResponse({
             accessToken: fresh.accessToken,
+            providerId: activeProviderId,
             modelId: activeModelId,
             reasoningEffort: resolveReasoningEffort(config),
             instructions: codexInstructions,
@@ -1543,7 +1569,7 @@ export async function runTelegramBot(options = {}) {
           await sendMessage(
             botToken,
             chatId,
-            `Codex request failed: ${trim(error?.message) || "unknown error"}`,
+            `Model request failed: ${trim(error?.message) || "unknown error"}`,
           );
         } finally {
           stopTypingNow();

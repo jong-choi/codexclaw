@@ -1,4 +1,5 @@
 export const CODEX_PROVIDER_ID = "openai-codex";
+export const QWEN_PROVIDER_ID = "qwen-portal";
 
 export const CODEX_MODEL_IDS = [
   "gpt-5.1",
@@ -15,6 +16,8 @@ export const LEGACY_CODEX_MODEL_ID_ALIASES = {
 };
 
 export const CODEX_API_BASE_URL = "https://chatgpt.com/backend-api";
+export const QWEN_API_BASE_URL = "https://portal.qwen.ai/v1";
+export const QWEN_MODEL_IDS = ["coder-model", "vision-model"];
 
 export const TELEGRAM_API_BASE_URL = "https://api.telegram.org";
 

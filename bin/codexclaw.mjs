@@ -8,7 +8,7 @@ function trim(value) {
 function printHelp() {
   process.stdout.write(
     [
-      "tele-codex - minimal Codex + Telegram bridge",
+      "tele-codex - minimal Codex/Qwen + Telegram bridge",
       "",
       "Usage:",
       "  tele-codex onboard [--config <path>]",
@@ -16,7 +16,7 @@ function printHelp() {
       "  tele-codex config show [--config <path>]",
       "",
       "Notes:",
-      "  - onboard: OAuth + model select + telegram setup + optional Notion/web/scheduler skill setup",
+      "  - onboard: provider OAuth + model select + telegram setup + optional Notion/web/scheduler skill setup",
       "  - telegram run: start long-polling bot",
       "  - in Telegram: /help shows command usage, /new resets context, /context shows history size, /usage shows live limit windows (e.g. 5h/1w), /think manages reasoning effort, /models and /model manage model",
       "  - in bot terminal: bye or exit stops telegram run (/bye, /exit also work)",
@@ -68,6 +68,21 @@ function redactConfig(config) {
   if (next?.codex?.oauth?.refresh) {
     next.codex.oauth.refresh = maskSecret(next.codex.oauth.refresh);
   }
+  if (next?.codex?.oauthByProvider && typeof next.codex.oauthByProvider === "object") {
+    for (const [providerId, entry] of Object.entries(next.codex.oauthByProvider)) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const sanitized = { ...entry };
+      if (sanitized.access) {
+        sanitized.access = maskSecret(sanitized.access);
+      }
+      if (sanitized.refresh) {
+        sanitized.refresh = maskSecret(sanitized.refresh);
+      }
+      next.codex.oauthByProvider[providerId] = sanitized;
+    }
+  }
   if (next?.skills?.entries && typeof next.skills.entries === "object") {
     for (const [skillKey, entry] of Object.entries(next.skills.entries)) {
       if (entry && typeof entry === "object" && "apiKey" in entry && entry.apiKey) {
@@ -76,6 +91,24 @@ function redactConfig(config) {
           apiKey: maskSecret(entry.apiKey),
         };
       }
+    }
+  }
+  if (next?.tools && typeof next.tools === "object") {
+    for (const [toolKey, entry] of Object.entries(next.tools)) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const sanitized = { ...entry };
+      if (sanitized.apiKey) {
+        sanitized.apiKey = maskSecret(sanitized.apiKey);
+      }
+      if (sanitized.access) {
+        sanitized.access = maskSecret(sanitized.access);
+      }
+      if (sanitized.refresh) {
+        sanitized.refresh = maskSecret(sanitized.refresh);
+      }
+      next.tools[toolKey] = sanitized;
     }
   }
   return next;

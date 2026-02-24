@@ -3,14 +3,14 @@
 [English](../README.md) | [한국어](README.ko.md) | [日本語](README.ja.md)
 
 このコードの大部分は GPT-5.3-Codex-xhigh で書かれており、Codex と一緒に継続して編集・改善できます。  
-このプロジェクトは Codex + Telegram 連携にフォーカスしています。  
+このプロジェクトは Codex/Qwen + Telegram 連携にフォーカスしています。  
 このプロジェクトは、より大きな OpenClaw プロジェクトから必要な部分だけを抽出して作成しています。  
 OpenClaw は MIT ライセンス([openclaw/openclaw](https://github.com/openclaw/openclaw))で公開されており、このプロジェクトも同じです。
 
 最小構成のオンボーディング + ランタイム:
 
-1. OpenAI Codex OAuth
-2. Codex モデル選択(7モデル)
+1. 認証 provider 選択(OpenAI Codex または Qwen)
+2. provider ごとのモデル選択
 3. Telegram ボットブリッジ
 4. 任意: Notion スキル API キー設定
 5. 任意: Web ツール(`web_search`, `web_fetch`)設定
@@ -60,7 +60,7 @@ npm install
 docker compose up --build -d
 ```
 
-オンボーディング実行(対話式、OAuth リダイレクト URL を手動貼り付け):
+オンボーディング実行(対話式 OAuth: Codex は手動コールバック、Qwen は device-code):
 
 ```bash
 docker compose run --rm codexclaw onboard
@@ -134,10 +134,9 @@ docker compose run --rm codexclaw config show
 npm run onboard
 ```
 
-OAuth は常に手動です:
-- CLI がログイン URL を表示
-- 任意のブラウザでログイン
-- コールバック URL を CLI に貼り付け
+OAuth フローは provider によって異なります:
+- OpenAI Codex: コールバック URL の手動貼り付け
+- Qwen: device-code ログイン(URLを開く + 承認 + 自動ポーリング)
 
 設定はデフォルトで `~/.codexclaw/config.json` に保存されます。  
 Telegram アクセスはデフォルトで openclaw スタイルのペアリング(`dmPolicy: "pairing"`)です:
@@ -152,7 +151,7 @@ Telegram アクセスはデフォルトで openclaw スタイルのペアリン�
 Notion (任意):
 - オンボーディング中に `notion` スキルを有効化し、Notion integration token を保存できます。
 - トークン保存先: `skills.entries.notion.apiKey`
-- 設定済みの場合、Codex は内蔵の `notion_api_request` ツールで Notion REST を利用できます。
+- 設定済みの場合、アシスタントは内蔵の `notion_api_request` ツールで Notion REST を利用できます。
 
 Web ツール (任意):
 - オンボーディング中に `web_search` と `web_fetch` を有効化できます。
@@ -197,14 +196,14 @@ npm run telegram
 - `/help` (`/commands`も可): コマンド一覧と使用例を表示
 - `/new`, `/clear`, `/reset`: 現在チャットの文脈をクリア
 - `/context`: 保存済み文脈メッセージ数を表示
-- `/usage`: Codex のリアルタイム利用枠ウィンドウ(例: 5h, 1w)を表示
+- `/usage`: リアルタイム利用枠ウィンドウを表示(Codex provider のみ)
 - `/think`, `/thinking`, `/reasoning`: Reasoning effort を表示/変更(`none|minimal|low|medium|high|xhigh`)
-- `/models`: 利用可能な Codex モデル一覧を表示
-- `/model`: 現在モデル + reasoning effort + 利用枠サマリーを表示し、`/model <id|番号>`で即時切替
+- `/models`: 現在 provider で利用可能なモデル一覧を表示
+- `/model`: 現在 provider/モデル + reasoning effort + 利用枠サマリーを表示し、`/model <id|番号>`で即時切替
 - 不正なコマンド/引数: 正しい使い方と `/help` を案内
 - ターミナルで `bye` または `exit` 入力: `telegram run` を即停止(`\`/bye\``, `\`/exit\``も可)
 - Telegram コマンドメニュー(`/`)は起動時に自動同期されます。
-- 現在の UTC/ローカル時刻コンテキストが各 Codex リクエストに注入されます。
+- 現在の UTC/ローカル時刻コンテキストが各モデルリクエストに注入されます。
 - 到来したスケジュールジョブは新規入力なしで同じボットプロセス内で実行されます。
 - リクエスト受信直後にボットが能動的にステータスメッセージを投稿します。
 - 処理中は定期的に、またスキル/ツール呼び出し時にステータスを更新します。

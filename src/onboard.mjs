@@ -1,9 +1,6 @@
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
   BRAVE_API_ENV_NAME,
-  CODEX_MODEL_IDS,
-  CODEX_PROVIDER_ID,
-  LEGACY_CODEX_MODEL_ID_ALIASES,
   NOTION_API_ENV_NAME,
   NOTION_SKILL_KEY,
   SCHEDULER_SKILL_KEY,
@@ -11,7 +8,20 @@ import {
   WEB_FETCH_SKILL_KEY,
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
-import { loginCodexOAuth } from "./oauth.mjs";
+import {
+  assignModelSelection,
+  assignProviderOAuth,
+  ensureProviderState,
+  listModelProviders,
+  resolveConfiguredModelSelection,
+  resolveConfiguredProviderId,
+  resolveModelRef,
+  resolveProviderLabel,
+  resolveProviderModelIds,
+  resolveProviderOAuth,
+  resolveProviderShortLabel,
+} from "./model-provider.mjs";
+import { loginProviderOAuth } from "./oauth.mjs";
 import { withPrompter } from "./prompt.mjs";
 import {
   ensureWorkspaceInitialized,
@@ -22,14 +32,6 @@ import {
 
 function trim(value) {
   return String(value ?? "").trim();
-}
-
-function normalizeCodexModelId(value) {
-  const raw = trim(value);
-  if (!raw) {
-    return "";
-  }
-  return LEGACY_CODEX_MODEL_ID_ALIASES[raw] ?? raw;
 }
 
 function normalizeAllowFrom(raw) {
@@ -45,22 +47,6 @@ function normalizeAllowFrom(raw) {
   );
 }
 
-function resolveCurrentModelId(config) {
-  const direct = normalizeCodexModelId(config?.codex?.model?.id);
-  if (direct) {
-    return direct;
-  }
-  const ref = trim(config?.codex?.model?.ref);
-  if (!ref) {
-    return "";
-  }
-  const slash = ref.indexOf("/");
-  return normalizeCodexModelId(slash < 0 ? ref : ref.slice(slash + 1));
-}
-
-function resolveModelRef(modelId) {
-  return `${CODEX_PROVIDER_ID}/${trim(modelId)}`;
-}
 
 function resolveSkillEntries(config) {
   if (!config || typeof config !== "object") {
@@ -130,7 +116,13 @@ function resolveConfiguredWorkspaceTemplateRoot(config) {
 
 export async function runOnboard(options = {}) {
   const loaded = await loadConfig(options.configPath);
-  const existing = loaded.config ?? {};
+  const existingRaw = loaded.config ?? {};
+  const existing = {
+    ...existingRaw,
+    codex: { ...(existingRaw.codex ?? {}) },
+  };
+  ensureProviderState(existing);
+
   const workspaceRoot = resolveConfiguredWorkspaceRoot(existing);
   const workspaceTemplateRoot = resolveConfiguredWorkspaceTemplateRoot(existing);
 
@@ -153,73 +145,80 @@ export async function runOnboard(options = {}) {
     prompter.intro("CodexClaw onboarding");
     prompter.note(
       [
-        "This setup includes only 6 steps:",
-        "1) OpenAI Codex OAuth",
-        "2) Choose one Codex model",
-        "3) Configure Telegram bot",
-        "4) Optional: configure Notion skill API key",
-        "5) Optional: configure web_search/web_fetch skills",
-        "6) Optional: configure scheduler skill",
+        "This setup includes only 7 steps:",
+        "1) Choose auth provider (OpenAI Codex or Qwen)",
+        "2) Provider OAuth login",
+        "3) Choose one model from selected provider",
+        "4) Configure Telegram bot",
+        "5) Optional: configure Notion skill API key",
+        "6) Optional: configure web_search/web_fetch skills",
+        "7) Optional: configure scheduler skill",
       ].join("\n"),
       "Scope",
     );
 
-    await prompter.select({
-      message: "Auth provider",
-      options: [
-        {
-          value: "openai-codex",
-          label: "OpenAI Codex (OAuth)",
-          hint: "ChatGPT OAuth login",
-        },
-      ],
-    });
+    const currentProviderId = resolveConfiguredProviderId(next);
+    const providerOptions = listModelProviders().map((provider) => ({
+      value: provider.id,
+      label: `${provider.label} (OAuth)`,
+      hint:
+        provider.id === currentProviderId
+          ? "current"
+          : provider.id === "qwen-portal"
+            ? "device-code login"
+            : "ChatGPT OAuth login",
+    }));
 
-    const hasExistingOAuth = Boolean(next.codex?.oauth?.access);
+    const selectedProviderId = await prompter.select({
+      message: "Auth provider",
+      options: providerOptions,
+    });
+    const selectedProviderLabel = resolveProviderLabel(selectedProviderId);
+    const selectedProviderShortLabel = resolveProviderShortLabel(selectedProviderId);
+
+    const existingOAuth = resolveProviderOAuth(next, selectedProviderId);
+    const hasExistingOAuth = Boolean(existingOAuth?.access);
     let shouldRunOAuth = true;
     if (hasExistingOAuth) {
       shouldRunOAuth = !(await prompter.confirm({
-        message: "Existing Codex OAuth found. Keep it?",
+        message: `Existing ${selectedProviderShortLabel} OAuth found. Keep it?`,
         initialValue: true,
       }));
     }
 
     if (shouldRunOAuth) {
-      const oauth = await loginCodexOAuth({
+      const oauth = await loginProviderOAuth({
+        providerId: selectedProviderId,
         prompter,
         log: (line) => process.stdout.write(`${line}\n`),
         error: (line) => process.stderr.write(`${line}\n`),
       });
 
       if (!oauth) {
-        throw new Error("Codex OAuth did not return credentials.");
+        throw new Error(`${selectedProviderLabel} OAuth did not return credentials.`);
       }
-
-      next.codex = {
-        ...next.codex,
-        oauth,
-      };
+      assignProviderOAuth(next, selectedProviderId, oauth);
+    } else if (existingOAuth) {
+      assignProviderOAuth(next, selectedProviderId, existingOAuth);
     }
 
-    const currentModelId = resolveCurrentModelId(next);
-    const modelOptions = CODEX_MODEL_IDS.map((id) => ({
+    const currentSelection = resolveConfiguredModelSelection(next);
+    const currentModelId =
+      currentSelection.providerId === selectedProviderId ? currentSelection.modelId : "";
+    const modelOptions = resolveProviderModelIds(selectedProviderId).map((id) => ({
       value: id,
-      label: resolveModelRef(id),
+      label: resolveModelRef(selectedProviderId, id),
       hint: id === currentModelId ? "current" : undefined,
     }));
 
     const selectedModelId = await prompter.select({
-      message: "Select Codex model",
+      message: `Select ${selectedProviderShortLabel} model`,
       options: modelOptions,
     });
 
-    next.codex = {
-      ...next.codex,
-      model: {
-        id: trim(selectedModelId),
-        ref: resolveModelRef(selectedModelId),
-      },
-    };
+    if (!assignModelSelection(next, selectedProviderId, selectedModelId)) {
+      throw new Error(`Invalid model selection for provider ${selectedProviderId}: ${selectedModelId}`);
+    }
 
     const existingToken = trim(next.telegram?.botToken);
     let botToken = existingToken;
@@ -466,11 +465,14 @@ export async function runOnboard(options = {}) {
     const webSearchKeyConfigured = Boolean(resolveSkillApiKey(saved.config, WEB_SEARCH_SKILL_KEY));
     const webFetchEnabled = resolveWebFetchSkillEnabled(saved.config);
     const schedulerEnabled = resolveSchedulerSkillEnabled(saved.config);
+    const savedSelection = resolveConfiguredModelSelection(saved.config);
+    const savedProviderLabel = resolveProviderLabel(savedSelection.providerId);
 
     prompter.outro(
       [
         `Saved config: ${saved.path}`,
-        `Model: ${saved.config?.codex?.model?.ref}`,
+        `Provider: ${savedProviderLabel} (${savedSelection.providerId})`,
+        `Model: ${savedSelection.ref || "(not set)"}`,
         "Telegram DM policy: pairing (default)",
         `Notion skill: ${notionEnabled ? "enabled" : "disabled"}`,
         notionEnabled

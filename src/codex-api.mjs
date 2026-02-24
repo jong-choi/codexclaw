@@ -6,11 +6,12 @@ import {
   BRAVE_SEARCH_ENDPOINT,
   CODEX_API_BASE_URL,
   CODEX_PROVIDER_ID,
-  LEGACY_CODEX_MODEL_ID_ALIASES,
   NOTION_API_BASE_URL,
   NOTION_API_ENV_NAME,
   NOTION_API_VERSION,
   NOTION_SKILL_KEY,
+  QWEN_API_BASE_URL,
+  QWEN_PROVIDER_ID,
   SCHEDULER_SKILL_KEY,
   TIME_CONTEXT_SKILL_KEY,
   WORKSPACE_FILES_SKILL_KEY,
@@ -19,6 +20,7 @@ import {
   WEB_FETCH_SKILL_KEY,
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
+import { normalizeProviderModelId, resolveProviderId } from "./model-provider.mjs";
 import {
   cancelScheduledJob,
   createScheduledJob,
@@ -457,14 +459,6 @@ function resolveWorkspaceReadMaxChars(value) {
   return resolveWebFetchMaxChars(value);
 }
 
-function normalizeCodexModelId(value) {
-  const raw = trim(value);
-  if (!raw) {
-    return "";
-  }
-  return LEGACY_CODEX_MODEL_ID_ALIASES[raw] ?? raw;
-}
-
 function normalizeReasoningEffort(value) {
   const normalized = trim(value).toLowerCase();
   if (!normalized) {
@@ -485,7 +479,33 @@ function normalizeReasoningEffort(value) {
   return normalized;
 }
 
-function buildFallbackCodexModel(modelId) {
+function resolveQwenInputTypes(modelId) {
+  return modelId === "vision-model" ? ["text", "image"] : ["text"];
+}
+
+function buildFallbackModel(providerId, modelId) {
+  const resolvedProviderId = resolveProviderId(providerId);
+  if (resolvedProviderId === QWEN_PROVIDER_ID) {
+    return {
+      id: modelId,
+      name: modelId,
+      api: "openai-completions",
+      provider: QWEN_PROVIDER_ID,
+      baseUrl: QWEN_API_BASE_URL,
+      reasoning: true,
+      compat: {
+        thinkingFormat: "qwen",
+        supportsDeveloperRole: false,
+        supportsStore: false,
+        supportsReasoningEffort: false,
+      },
+      input: resolveQwenInputTypes(modelId),
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: DEFAULT_MAX_TOKENS,
+    };
+  }
+
   return {
     id: modelId,
     name: modelId,
@@ -500,13 +520,14 @@ function buildFallbackCodexModel(modelId) {
   };
 }
 
-function resolveCodexModel(modelId) {
-  const normalizedId = normalizeCodexModelId(modelId);
-  const registered = getModel(CODEX_PROVIDER_ID, normalizedId);
+function resolveModel(providerId, modelId) {
+  const resolvedProviderId = resolveProviderId(providerId);
+  const normalizedId = normalizeProviderModelId(resolvedProviderId, modelId);
+  const registered = getModel(resolvedProviderId, normalizedId);
   if (registered) {
     return registered;
   }
-  return buildFallbackCodexModel(normalizedId);
+  return buildFallbackModel(resolvedProviderId, normalizedId);
 }
 
 function collectTextFromAssistantMessage(message) {
@@ -2170,10 +2191,10 @@ async function executeScheduleRecurringResumeToolCall(params) {
 
 function validateAssistantResponse(response) {
   if (!response || typeof response !== "object") {
-    throw new Error("Codex API returned an invalid response.");
+    throw new Error("Model API returned an invalid response.");
   }
   if (response.stopReason === "error" || response.stopReason === "aborted") {
-    throw new Error(`Codex API error: ${trim(response.errorMessage) || "request failed"}`);
+    throw new Error(`Model API error: ${trim(response.errorMessage) || "request failed"}`);
   }
 }
 
@@ -2196,7 +2217,8 @@ export function extractResponseText(payload) {
 
 export async function requestCodexResponse(params) {
   const accessToken = trim(params?.accessToken);
-  const modelId = normalizeCodexModelId(params?.modelId);
+  const providerId = resolveProviderId(params?.providerId);
+  const modelId = normalizeProviderModelId(providerId, params?.modelId);
   const message = trim(params?.message);
   const reasoningEffortRaw = normalizeReasoningEffort(params?.reasoningEffort);
   const instructions = trim(params?.instructions) || DEFAULT_CODEX_INSTRUCTIONS;
@@ -2236,14 +2258,14 @@ export async function requestCodexResponse(params) {
     timeContextEnabled,
   });
 
-  const model = resolveCodexModel(modelId);
+  if (!modelId) {
+    throw new Error("Missing model id.");
+  }
+  const model = resolveModel(providerId, modelId);
   const history = normalizeConversationMessages(params?.messages, model);
 
   if (!accessToken) {
     throw new Error("Missing access token.");
-  }
-  if (!modelId) {
-    throw new Error("Missing model id.");
   }
   if (!message && history.length === 0) {
     throw new Error("Message is empty.");
@@ -2516,7 +2538,7 @@ export async function requestCodexResponse(params) {
         },
       );
     } catch (error) {
-      throw new Error(`Codex API error: ${trim(error?.message) || String(error)}`);
+      throw new Error(`Model API error: ${trim(error?.message) || String(error)}`);
     }
 
     validateAssistantResponse(response);
@@ -2592,12 +2614,12 @@ export async function requestCodexResponse(params) {
   }
 
   if (!response) {
-    throw new Error("Codex API returned no response.");
+    throw new Error("Model API returned no response.");
   }
 
   const text = extractResponseText(response);
   if (!text) {
-    throw new Error("Codex API returned no text output.");
+    throw new Error("Model API returned no text output.");
   }
 
   return {

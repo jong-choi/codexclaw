@@ -3,14 +3,14 @@
 [English](../README.md) | [한국어](README.ko.md) | [日本語](README.ja.md)
 
 이 코드의 대부분은 GPT-5.3-Codex-xhigh로 작성되었고, 그래서 Codex와 함께 계속 수정하고 발전시킬 수 있습니다.  
-이 프로젝트는 Codex + Telegram 연동에 집중합니다.  
+이 프로젝트는 Codex/Qwen + Telegram 연동에 집중합니다.  
 이 프로젝트는 훨씬 큰 OpenClaw 프로젝트에서 제가 필요한 부분만 추출해서 만들었습니다.  
 OpenClaw는 MIT 라이선스([openclaw/openclaw](https://github.com/openclaw/openclaw))로 배포되며, 이 프로젝트도 동일합니다.
 
 최소한의 온보딩 + 런타임 구성:
 
-1. OpenAI Codex OAuth
-2. Codex 모델 선택(7개 모델)
+1. 인증 provider 선택(OpenAI Codex 또는 Qwen)
+2. provider별 모델 선택
 3. Telegram 봇 브리지
 4. 선택: Notion 스킬 API 키 설정
 5. 선택: 웹 도구(`web_search`, `web_fetch`) 설정
@@ -60,7 +60,7 @@ npm install
 docker compose up --build -d
 ```
 
-온보딩 실행(대화형, OAuth 리다이렉트 URL 수동 붙여넣기):
+온보딩 실행(대화형 OAuth: Codex는 콜백 URL 수동 입력, Qwen은 device-code):
 
 ```bash
 docker compose run --rm codexclaw onboard
@@ -134,10 +134,9 @@ docker compose run --rm codexclaw config show
 npm run onboard
 ```
 
-OAuth는 항상 수동 방식입니다:
-- CLI가 로그인 URL을 출력
-- 브라우저에서 로그인
-- 콜백 URL을 CLI에 붙여넣기
+OAuth 방식은 provider에 따라 다릅니다:
+- OpenAI Codex: 콜백 URL 수동 붙여넣기
+- Qwen: device-code 로그인(URL 열기 + 승인 + 자동 폴링)
 
 기본적으로 설정은 `~/.codexclaw/config.json`에 저장됩니다.  
 Telegram 접근은 기본적으로 openclaw 스타일 페어링(`dmPolicy: "pairing"`)을 따릅니다:
@@ -152,7 +151,7 @@ Telegram 접근은 기본적으로 openclaw 스타일 페어링(`dmPolicy: "pair
 Notion (선택):
 - 온보딩 중 `notion` 스킬을 활성화하고 Notion integration token을 저장할 수 있습니다.
 - 토큰 저장 위치: `skills.entries.notion.apiKey`
-- 설정되면 Codex가 내장 `notion_api_request` 도구로 Notion REST 호출을 수행할 수 있습니다.
+- 설정되면 어시스턴트가 내장 `notion_api_request` 도구로 Notion REST 호출을 수행할 수 있습니다.
 
 웹 도구 (선택):
 - 온보딩 중 `web_search`, `web_fetch` 스킬을 활성화할 수 있습니다.
@@ -197,14 +196,14 @@ npm run telegram
 - `/help` (`/commands`도 가능): 커맨드 목록과 사용 예시 출력
 - `/new`, `/clear`, `/reset`: 현재 채팅의 저장된 컨텍스트 초기화
 - `/context`: 저장된 컨텍스트 메시지 수 확인
-- `/usage`: Codex 실시간 한도 윈도우(예: 5h, 1w) 확인
+- `/usage`: 실시간 한도 윈도우 확인(Codex provider에서만 지원)
 - `/think`, `/thinking`, `/reasoning`: 리즈닝 에포트 조회/변경(`none|minimal|low|medium|high|xhigh`)
-- `/models`: 사용 가능한 Codex 모델 목록 확인
-- `/model`: 현재 모델 + 리즈닝 에포트 + 한도 요약 확인, `/model <id|번호>`로 즉시 모델 변경
+- `/models`: 현재 provider에서 사용 가능한 모델 목록 확인
+- `/model`: 현재 provider/모델 + 리즈닝 에포트 + 한도 요약 확인, `/model <id|번호>`로 즉시 모델 변경
 - 잘못된 커맨드/인자 입력 시: 올바른 사용법과 `/help` 안내를 반환
 - 터미널 입력 `bye` 또는 `exit`: `telegram run` 즉시 종료(`\`/bye\``, `\`/exit\``도 동작)
 - Telegram 명령어 메뉴(`/`)는 시작 시 자동 동기화됩니다.
-- 현재 UTC/로컬 시간 컨텍스트가 모든 Codex 요청에 주입됩니다.
+- 현재 UTC/로컬 시간 컨텍스트가 모든 모델 요청에 주입됩니다.
 - 도래한 스케줄 작업은 별도 입력 없이 같은 봇 프로세스에서 실행됩니다.
 - 사용자 요청 수신 직후 봇이 상태 메시지를 능동적으로 게시합니다.
 - 처리 중에는 주기적으로, 그리고 스킬/도구 호출 시 상태를 업데이트합니다.

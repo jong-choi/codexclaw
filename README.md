@@ -5,14 +5,14 @@
 
 
 Most of this code was written with GPT-5.3-Codex-xhigh, so you can keep editing and iterating with Codex too. 
-This project is focused on Codex + Telegram integration. 
+This project is focused on Codex/Qwen + Telegram integration. 
 This project was created by extracting only the parts I needed from the much larger OpenClaw project. 
 OpenClaw is released under the MIT License ([openclaw/openclaw](https://github.com/openclaw/openclaw)) and yes, this project is too. 
 
 Minimal onboarding + runtime for:
 
-1. OpenAI Codex OAuth
-2. Codex model selection (7 models)
+1. Auth provider selection (OpenAI Codex or Qwen)
+2. Provider model selection
 3. Telegram bot bridge
 4. Optional Notion skill API key setup
 5. Optional web tools (`web_search`, `web_fetch`) setup
@@ -62,7 +62,7 @@ Build image and start utility container (does not auto-run Telegram bot):
 docker compose up --build -d
 ```
 
-Run onboarding (interactive, manual OAuth redirect URL paste):
+Run onboarding (interactive OAuth: manual callback for Codex, device-code for Qwen):
 
 ```bash
 docker compose run --rm codexclaw onboard
@@ -136,10 +136,9 @@ Notes:
 npm run onboard
 ```
 
-OAuth is always manual:
-- CLI prints a login URL
-- You log in from any browser
-- Paste the callback URL back into CLI
+OAuth flow depends on provider:
+- OpenAI Codex: manual callback URL paste
+- Qwen: device-code login (open URL + approve + polling)
 
 This stores config in `~/.codexclaw/config.json` by default.
 Telegram access follows openclaw-style pairing by default (`dmPolicy: "pairing"`):
@@ -154,7 +153,7 @@ Conversation history is stored in `~/.codexclaw/telegram-conversations.json`.
 Notion (optional):
 - During onboarding, you can enable the `notion` skill and save a Notion integration token.
 - Token is stored at `skills.entries.notion.apiKey`.
-- When configured, Codex can use the built-in `notion_api_request` tool for Notion REST calls.
+- When configured, the assistant can use the built-in `notion_api_request` tool for Notion REST calls.
 
 Web tools (optional):
 - During onboarding, you can enable `web_search` and `web_fetch` skills.
@@ -199,14 +198,14 @@ Runtime behavior:
 - `/help` (or `/commands`): show command list and usage examples.
 - `/new`, `/clear`, `/reset`: clear saved context for the current chat.
 - `/context`: show the number of stored context messages.
-- `/usage`: show live Codex usage limit windows (for example, 5h and 1w).
+- `/usage`: show live usage limit windows (Codex provider only).
 - `/think`, `/thinking`, `/reasoning`: show or set reasoning effort (`none|minimal|low|medium|high|xhigh`).
-- `/models`: list available Codex models.
-- `/model`: show current model + current reasoning effort + usage limit summary. `/model <id|number>` switches model immediately.
+- `/models`: list available models for the current provider.
+- `/model`: show current provider/model + current reasoning effort + usage summary. `/model <id|number>` switches model immediately.
 - Invalid command or wrong arguments: bot replies with the correct usage and points to `/help`.
 - Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
 - Telegram command menu (`/`) is synced automatically on startup.
-- Current UTC/local time context is injected into each Codex request.
+- Current UTC/local time context is injected into each model request.
 - Due scheduled jobs are executed in the same bot process without new incoming messages.
 - The bot proactively posts a status message immediately after receiving a request.
 - While processing, it updates status periodically and during skill/tool calls.
