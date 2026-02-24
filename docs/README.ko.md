@@ -198,8 +198,12 @@ npm run telegram
 - `/context`: 저장된 컨텍스트 메시지 수 확인
 - `/usage`: 실시간 한도 윈도우 확인(Codex provider에서만 지원)
 - `/think`, `/thinking`, `/reasoning`: 리즈닝 에포트 조회/변경(`none|minimal|low|medium|high|xhigh`)
+- `/provider`: 현재 provider/모델과 진행 중인 OAuth 상태 확인
+- `/provider <id|alias|번호>`: provider 전환(해당 provider OAuth가 없으면 채팅 내 OAuth 시작)
+- `/provider cancel`: 진행 중인 provider OAuth 취소
 - `/models`: 현재 provider에서 사용 가능한 모델 목록 확인
 - `/model`: 현재 provider/모델 + 리즈닝 에포트 + 한도 요약 확인, `/model <id|번호>`로 즉시 모델 변경
+- Codex OAuth 진행 중에는 다음 일반 메시지를 콜백 URL 입력으로 처리
 - 잘못된 커맨드/인자 입력 시: 올바른 사용법과 `/help` 안내를 반환
 - 터미널 입력 `bye` 또는 `exit`: `telegram run` 즉시 종료(`\`/bye\``, `\`/exit\``도 동작)
 - Telegram 명령어 메뉴(`/`)는 시작 시 자동 동기화됩니다.

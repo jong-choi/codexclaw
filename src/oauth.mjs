@@ -165,6 +165,82 @@ async function pollQwenDeviceToken(params) {
   };
 }
 
+export async function beginQwenDeviceOAuth() {
+  const { verifier, challenge } = generatePkce();
+  const device = await requestQwenDeviceCode(challenge);
+  return {
+    verifier,
+    deviceCode: device.deviceCode,
+    userCode: device.userCode,
+    verificationUrl: device.verificationUrl,
+    expiresAt: Date.now() + device.expiresIn * 1000,
+    pollIntervalMs: (device.interval ?? 2) * 1000,
+  };
+}
+
+export async function pollQwenDeviceOAuth(params) {
+  return await pollQwenDeviceToken({
+    deviceCode: params?.deviceCode,
+    verifier: params?.verifier,
+  });
+}
+
+export function createCodexCallbackOAuthSession(params = {}) {
+  let resolved = false;
+  let resolveInput;
+  let rejectInput;
+  const inputPromise = new Promise((resolve, reject) => {
+    resolveInput = resolve;
+    rejectInput = reject;
+  });
+
+  const authPromise = loginOpenAICodex({
+    onAuth: async (event) => {
+      const url = trim(event?.url);
+      if (!url) {
+        return;
+      }
+      if (typeof params.onAuthUrl === "function") {
+        await params.onAuthUrl(url);
+      }
+    },
+    onPrompt: async (prompt) => {
+      if (typeof params.onPrompt === "function") {
+        await params.onPrompt(prompt);
+      }
+      const value = await inputPromise;
+      return String(value);
+    },
+    onProgress: (message) => {
+      if (typeof params.onProgress === "function") {
+        params.onProgress(trim(message));
+      }
+    },
+    // Force manual redirect-url input flow by cancelling local callback auto-complete path.
+    onManualCodeInput: async () => "",
+  });
+
+  return {
+    async waitForCredentials() {
+      return await authPromise;
+    },
+    submitCallbackUrl(url) {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      resolveInput(String(url));
+    },
+    cancel(reason = "OAuth canceled.") {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      rejectInput(new Error(reason));
+    },
+  };
+}
+
 function resolveCodexOAuthProvider() {
   const providers = getOAuthProviders();
   return providers.find((provider) => provider.id === CODEX_PROVIDER_ID) ?? null;

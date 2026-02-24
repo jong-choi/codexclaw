@@ -198,8 +198,12 @@ npm run telegram
 - `/context`: 保存済み文脈メッセージ数を表示
 - `/usage`: リアルタイム利用枠ウィンドウを表示(Codex provider のみ)
 - `/think`, `/thinking`, `/reasoning`: Reasoning effort を表示/変更(`none|minimal|low|medium|high|xhigh`)
+- `/provider`: 現在 provider/モデルと進行中 OAuth 状態を表示
+- `/provider <id|alias|番号>`: provider を切替(その provider の OAuth が無ければチャット内で OAuth 開始)
+- `/provider cancel`: 進行中の provider OAuth をキャンセル
 - `/models`: 現在 provider で利用可能なモデル一覧を表示
 - `/model`: 現在 provider/モデル + reasoning effort + 利用枠サマリーを表示し、`/model <id|番号>`で即時切替
+- Codex OAuth 進行中は、次の通常メッセージをコールバック URL 入力として扱います
 - 不正なコマンド/引数: 正しい使い方と `/help` を案内
 - ターミナルで `bye` または `exit` 入力: `telegram run` を即停止(`\`/bye\``, `\`/exit\``も可)
 - Telegram コマンドメニュー(`/`)は起動時に自動同期されます。

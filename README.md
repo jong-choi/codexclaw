@@ -200,8 +200,12 @@ Runtime behavior:
 - `/context`: show the number of stored context messages.
 - `/usage`: show live usage limit windows (Codex provider only).
 - `/think`, `/thinking`, `/reasoning`: show or set reasoning effort (`none|minimal|low|medium|high|xhigh`).
+- `/provider`: show current provider/model and pending OAuth state.
+- `/provider <id|alias|number>`: switch provider; if OAuth is missing, start provider OAuth in chat.
+- `/provider cancel`: cancel pending provider OAuth.
 - `/models`: list available models for the current provider.
 - `/model`: show current provider/model + current reasoning effort + usage summary. `/model <id|number>` switches model immediately.
+- While Codex OAuth is pending, the next non-command message is treated as callback URL input.
 - Invalid command or wrong arguments: bot replies with the correct usage and points to `/help`.
 - Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
 - Telegram command menu (`/`) is synced automatically on startup.

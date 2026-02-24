@@ -9,12 +9,15 @@ import {
 } from "./conversation-store.mjs";
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
+  CODEX_PROVIDER_ID,
+  QWEN_PROVIDER_ID,
   TELEGRAM_API_BASE_URL,
 } from "./constants.mjs";
 import {
   assignModelSelection,
   assignProviderOAuth,
   ensureProviderState,
+  listModelProviders,
   normalizeProviderModelId,
   providerSupportsUsageSnapshot,
   resolveConfiguredProviderId,
@@ -23,7 +26,12 @@ import {
   resolveProviderOAuth,
   resolveProviderShortLabel,
 } from "./model-provider.mjs";
-import { resolveFreshProviderAccessToken } from "./oauth.mjs";
+import {
+  beginQwenDeviceOAuth,
+  createCodexCallbackOAuthSession,
+  pollQwenDeviceOAuth,
+  resolveFreshProviderAccessToken,
+} from "./oauth.mjs";
 import { buildPairingReply } from "./pairing-messages.mjs";
 import {
   approveChannelPairingCode,
@@ -76,9 +84,21 @@ const TELEGRAM_BOT_COMMANDS = [
   { command: "context", description: "Show stored context message count" },
   { command: "usage", description: "Show usage limits (Codex only)" },
   { command: "think", description: "Show or set reasoning effort" },
+  { command: "provider", description: "Show or switch provider (/provider <id|alias|number>)" },
   { command: "models", description: "List available models for current provider" },
   { command: "model", description: "Show or switch model (/model <id|number>)" },
 ];
+
+const PROVIDER_CANCEL_TOKENS = new Set(["cancel", "abort", "stop"]);
+const PROVIDER_ALIAS_TO_ID = new Map([
+  ["codex", CODEX_PROVIDER_ID],
+  ["openai", CODEX_PROVIDER_ID],
+  ["openai-codex", CODEX_PROVIDER_ID],
+  ["openai_codex", CODEX_PROVIDER_ID],
+  ["qwen", QWEN_PROVIDER_ID],
+  ["qwen-portal", QWEN_PROVIDER_ID],
+  ["qwen_portal", QWEN_PROVIDER_ID],
+]);
 
 function isInlineExitCommand(value) {
   const token = trim(value).toLowerCase();
@@ -667,6 +687,116 @@ function resolveCommandArgs(text) {
   return trim(raw.slice(firstSpace + 1));
 }
 
+function resolveProviderArgToken(value) {
+  return trim(value).toLowerCase().split(/\s+/)[0] ?? "";
+}
+
+function isProviderCancelArg(value) {
+  return PROVIDER_CANCEL_TOKENS.has(resolveProviderArgToken(value));
+}
+
+function resolveProviderSelection(value) {
+  const token = resolveProviderArgToken(value);
+  if (!token) {
+    return "";
+  }
+
+  const providers = listModelProviders();
+  if (/^\d+$/.test(token)) {
+    const index = Number.parseInt(token, 10);
+    if (Number.isInteger(index) && index >= 1 && index <= providers.length) {
+      return providers[index - 1].id;
+    }
+    return "";
+  }
+
+  const aliased = PROVIDER_ALIAS_TO_ID.get(token);
+  if (aliased) {
+    return aliased;
+  }
+
+  for (const provider of providers) {
+    if (trim(provider?.id).toLowerCase() === token) {
+      return provider.id;
+    }
+  }
+  return "";
+}
+
+function resolveProviderTargetModelId(providerId, currentModelId) {
+  const modelIds = resolveProviderModelIds(providerId);
+  if (modelIds.length === 0) {
+    return "";
+  }
+  const normalizedCurrent = normalizeProviderModelId(providerId, currentModelId);
+  if (normalizedCurrent && modelIds.includes(normalizedCurrent)) {
+    return normalizedCurrent;
+  }
+  return modelIds[0];
+}
+
+function buildProviderCommandMessage(params) {
+  const providers = listModelProviders();
+  const currentProviderId = trim(params?.providerId) || resolveConfiguredProviderId(params?.config);
+  const currentModelId = trim(params?.modelId);
+  const pending = params?.pendingProviderOAuth;
+  const chatId = trim(params?.chatId);
+  const senderId = trim(params?.senderId);
+  const ownsPending =
+    pending &&
+    trim(pending?.chatId) === chatId &&
+    trim(pending?.senderId) === senderId;
+
+  const lines = [
+    `Current provider: ${resolveProviderShortLabel(currentProviderId)} (${currentProviderId})`,
+    `Current model: ${resolveModelRef(currentProviderId, currentModelId)}`,
+    `Reasoning effort: ${resolveReasoningEffort(params?.config)}`,
+    "",
+  ];
+
+  if (pending) {
+    const pendingProviderLabel = resolveProviderShortLabel(pending.providerId);
+    const ownerLabel = ownsPending ? "this chat" : `chat ${trim(pending.chatId) || "unknown"}`;
+    lines.push(`Pending OAuth: ${pendingProviderLabel} (${ownerLabel})`);
+    if (ownsPending) {
+      if (pending.kind === "codex-callback") {
+        lines.push("Paste callback URL as your next non-command message, or run /provider cancel.");
+      } else {
+        lines.push("Complete browser approval, or run /provider cancel.");
+      }
+    } else {
+      lines.push("Another session is already running provider OAuth.");
+    }
+    lines.push("");
+  }
+
+  lines.push("Available providers:");
+  for (let i = 0; i < providers.length; i += 1) {
+    const provider = providers[i];
+    const current = provider.id === currentProviderId ? " (current)" : "";
+    const oauthReady = Boolean(resolveProviderOAuth(params?.config, provider.id)?.access);
+    const oauthSuffix = oauthReady ? "oauth ready" : "oauth required";
+    lines.push(`${i + 1}. ${provider.shortLabel} (${provider.id})${current} - ${oauthSuffix}`);
+  }
+  lines.push("");
+  lines.push("Usage:");
+  lines.push("/provider");
+  lines.push("/provider <id|alias|number>");
+  lines.push("/provider cancel");
+  lines.push("Aliases: codex, openai, qwen");
+  return lines.join("\n");
+}
+
+function buildProviderUpdatedMessage(config, providerId, modelId, unchanged = false) {
+  return [
+    unchanged ? "Provider unchanged." : "Provider updated.",
+    `Current provider: ${resolveProviderShortLabel(providerId)} (${providerId})`,
+    `Current model: ${resolveModelRef(providerId, modelId)}`,
+    `Reasoning effort: ${resolveReasoningEffort(config)}`,
+    "Use /models and /model <id|number> to manage model selection.",
+  ].join("\n");
+}
+
 function isResetCommand(token) {
   return token === "/new" || token === "/clear" || token === "/reset";
 }
@@ -693,6 +823,7 @@ function isKnownChatCommand(token) {
     token === "/context" ||
     token === "/usage" ||
     isReasoningCommand(token) ||
+    token === "/provider" ||
     token === "/models" ||
     token === "/model"
   );
@@ -710,6 +841,9 @@ function buildHelpMessage(providerId) {
     "/context - Show stored context message count.",
     "/usage - Show live usage limits (Codex only).",
     "/think <level> - Set reasoning effort.",
+    "/provider - Show provider status and pending OAuth state.",
+    "/provider <id|alias|number> - Switch provider (starts OAuth only when needed).",
+    "/provider cancel - Cancel pending provider OAuth request.",
     "/models - List available models for current provider.",
     `/model - Show current provider/model (${providerShortLabel}) + reasoning + usage summary.`,
     "/model <id|number> - Switch model immediately.",
@@ -718,6 +852,9 @@ function buildHelpMessage(providerId) {
     "Think aliases: /thinking, /reasoning, /reason, /t",
     "",
     "Examples:",
+    "/provider qwen",
+    "/provider 1",
+    "/provider cancel",
     "/think medium",
     "/model 1",
     `/model ${exampleModel}`,
@@ -1063,6 +1200,7 @@ export async function runTelegramBot(options = {}) {
   let triedWebhookReset = false;
   let shouldStop = false;
   let pollingAbortController = null;
+  let pendingProviderOAuth = null;
   const requestStop = () => {
     if (shouldStop) {
       return;
@@ -1072,6 +1210,261 @@ export async function runTelegramBot(options = {}) {
     pollingAbortController = null;
     process.stdout.write("Exit command received. Stopping CodexClaw Telegram bot.\n");
     process.exit(0);
+  };
+
+  const ownsPendingProviderOAuth = (pending, chatId, senderId) => {
+    if (!pending) {
+      return false;
+    }
+    return trim(pending.chatId) === trim(chatId) && trim(pending.senderId) === trim(senderId);
+  };
+
+  const clearPendingProviderOAuth = (pending = null) => {
+    if (!pending || pendingProviderOAuth === pending) {
+      pendingProviderOAuth = null;
+    }
+  };
+
+  const applyProviderSwitch = async ({ providerId, oauthCredentials }) => {
+    const nextProviderId = trim(providerId) || activeProviderId;
+    const nextOauth =
+      oauthCredentials && typeof oauthCredentials === "object" ? { ...oauthCredentials } : null;
+    if (!nextOauth || !trim(nextOauth.access)) {
+      throw new Error(`${resolveProviderShortLabel(nextProviderId)} OAuth credentials are missing.`);
+    }
+
+    const nextModelId = resolveProviderTargetModelId(nextProviderId, activeModelId);
+    if (!nextModelId) {
+      throw new Error(`No models are registered for provider ${nextProviderId}.`);
+    }
+
+    const unchanged = nextProviderId === activeProviderId && nextModelId === activeModelId;
+    assignProviderOAuth(config, nextProviderId, nextOauth);
+    const modelAssigned = assignModelSelection(config, nextProviderId, nextModelId);
+    if (!modelAssigned) {
+      throw new Error(`Failed to assign model ${nextModelId} for provider ${nextProviderId}.`);
+    }
+
+    activeProviderId = nextProviderId;
+    activeModelId = nextModelId;
+    oauth = nextOauth;
+    config.telegram = {
+      ...config.telegram,
+      offset,
+    };
+    await saveConfig(config, configPath);
+
+    process.stdout.write(
+      `${unchanged ? "Provider confirmed" : "Provider switched"}: ${
+        resolveProviderShortLabel(activeProviderId)
+      } (${activeProviderId}), model ${resolveModelRef(activeProviderId, activeModelId)}.\n`,
+    );
+    return {
+      providerId: activeProviderId,
+      modelId: activeModelId,
+      unchanged,
+    };
+  };
+
+  const startQwenProviderOAuth = async ({ providerId, chatId, senderId }) => {
+    const started = await beginQwenDeviceOAuth();
+    const pending = {
+      kind: "qwen-device",
+      providerId,
+      chatId,
+      senderId,
+      verifier: started.verifier,
+      deviceCode: started.deviceCode,
+      userCode: started.userCode,
+      verificationUrl: started.verificationUrl,
+      expiresAt: started.expiresAt,
+      pollIntervalMs: started.pollIntervalMs,
+      canceled: false,
+    };
+    pendingProviderOAuth = pending;
+    process.stdout.write(
+      `Started Qwen OAuth device flow for chat ${chatId} (sender ${senderId}).\n`,
+    );
+
+    await sendMessage(
+      botToken,
+      chatId,
+      [
+        "Qwen OAuth started.",
+        `1) Open: ${pending.verificationUrl}`,
+        `2) Enter code: ${pending.userCode}`,
+        "After approval, provider switch completes automatically.",
+        "Use /provider cancel to abort this request.",
+      ].join("\n"),
+    );
+
+    void (async () => {
+      let pollIntervalMs = pending.pollIntervalMs;
+      while (pendingProviderOAuth === pending && !pending.canceled && Date.now() < pending.expiresAt) {
+        await sleep(pollIntervalMs);
+        if (pendingProviderOAuth !== pending || pending.canceled) {
+          return;
+        }
+
+        let polled;
+        try {
+          polled = await pollQwenDeviceOAuth({
+            deviceCode: pending.deviceCode,
+            verifier: pending.verifier,
+          });
+        } catch (error) {
+          if (pendingProviderOAuth !== pending) {
+            return;
+          }
+          clearPendingProviderOAuth(pending);
+          await sendMessage(
+            botToken,
+            chatId,
+            `Qwen OAuth failed: ${trim(error?.message) || "polling error"}`,
+          ).catch(() => {});
+          return;
+        }
+
+        if (pendingProviderOAuth !== pending || pending.canceled) {
+          return;
+        }
+
+        if (polled.status === "success") {
+          clearPendingProviderOAuth(pending);
+          try {
+            const switched = await applyProviderSwitch({
+              providerId,
+              oauthCredentials: polled.token,
+            });
+            await sendMessage(
+              botToken,
+              chatId,
+              buildProviderUpdatedMessage(
+                config,
+                switched.providerId,
+                switched.modelId,
+                switched.unchanged,
+              ),
+            ).catch(() => {});
+          } catch (error) {
+            await sendMessage(
+              botToken,
+              chatId,
+              `Provider switch failed: ${trim(error?.message) || "unknown error"}`,
+            ).catch(() => {});
+          }
+          return;
+        }
+
+        if (polled.status === "error") {
+          clearPendingProviderOAuth(pending);
+          await sendMessage(
+            botToken,
+            chatId,
+            `Qwen OAuth failed: ${trim(polled.message) || "authorization error"}`,
+          ).catch(() => {});
+          return;
+        }
+
+        if (polled.slowDown) {
+          pollIntervalMs = Math.min(Math.round(pollIntervalMs * 1.5), 10_000);
+        }
+      }
+
+      if (pendingProviderOAuth === pending && !pending.canceled) {
+        clearPendingProviderOAuth(pending);
+        await sendMessage(
+          botToken,
+          chatId,
+          "Qwen OAuth timed out. Run /provider qwen to start again.",
+        ).catch(() => {});
+      }
+    })();
+  };
+
+  const startCodexProviderOAuth = async ({ providerId, chatId, senderId }) => {
+    const pending = {
+      kind: "codex-callback",
+      providerId,
+      chatId,
+      senderId,
+      callbackSubmitted: false,
+      session: null,
+    };
+    pendingProviderOAuth = pending;
+    process.stdout.write(`Started Codex callback OAuth flow for chat ${chatId} (sender ${senderId}).\n`);
+
+    const session = createCodexCallbackOAuthSession({
+      onAuthUrl: async (url) => {
+        if (pendingProviderOAuth !== pending) {
+          return;
+        }
+        try {
+          await sendMessage(
+            botToken,
+            chatId,
+            [
+              "OpenAI Codex OAuth URL:",
+              url,
+              "",
+              "Complete browser login, then paste the callback URL here as your next message.",
+              "Use /provider cancel to abort this request.",
+            ].join("\n"),
+          );
+        } catch (error) {
+          process.stderr.write(
+            `Failed to send Codex OAuth URL message: ${trim(error?.message) || String(error)}\n`,
+          );
+        }
+      },
+      onProgress: (message) => {
+        const status = trim(message);
+        if (status) {
+          process.stdout.write(`Codex OAuth progress: ${status}\n`);
+        }
+      },
+    });
+    pending.session = session;
+
+    await sendMessage(
+      botToken,
+      chatId,
+      "Starting OpenAI Codex OAuth. Waiting for login URL...",
+    );
+
+    void (async () => {
+      try {
+        const credentials = await session.waitForCredentials();
+        if (pendingProviderOAuth !== pending) {
+          return;
+        }
+        clearPendingProviderOAuth(pending);
+        const switched = await applyProviderSwitch({
+          providerId,
+          oauthCredentials: credentials,
+        });
+        await sendMessage(
+          botToken,
+          chatId,
+          buildProviderUpdatedMessage(
+            config,
+            switched.providerId,
+            switched.modelId,
+            switched.unchanged,
+          ),
+        ).catch(() => {});
+      } catch (error) {
+        if (pendingProviderOAuth !== pending) {
+          return;
+        }
+        clearPendingProviderOAuth(pending);
+        await sendMessage(
+          botToken,
+          chatId,
+          `OpenAI Codex OAuth failed: ${trim(error?.message) || "unknown error"}`,
+        ).catch(() => {});
+      }
+    })();
   };
 
   process.stdout.write(`CodexClaw Telegram bot is running.\n`);
@@ -1195,6 +1588,48 @@ export async function runTelegramBot(options = {}) {
           continue;
         }
 
+        const senderPendingProviderOAuth = ownsPendingProviderOAuth(
+          pendingProviderOAuth,
+          chatId,
+          senderId,
+        )
+          ? pendingProviderOAuth
+          : null;
+        if (senderPendingProviderOAuth && command && command !== "/provider") {
+          await sendMessage(
+            botToken,
+            chatId,
+            [
+              `${resolveProviderShortLabel(senderPendingProviderOAuth.providerId)} OAuth is in progress.`,
+              senderPendingProviderOAuth.kind === "codex-callback"
+                ? "Paste callback URL as your next non-command message, or run /provider cancel."
+                : "Complete browser approval, or run /provider cancel.",
+            ].join("\n"),
+          );
+          continue;
+        }
+
+        if (senderPendingProviderOAuth && !command) {
+          if (senderPendingProviderOAuth.kind === "codex-callback") {
+            senderPendingProviderOAuth.session?.submitCallbackUrl(text);
+            if (!senderPendingProviderOAuth.callbackSubmitted) {
+              senderPendingProviderOAuth.callbackSubmitted = true;
+              await sendMessage(
+                botToken,
+                chatId,
+                "Callback URL received. Completing OpenAI Codex OAuth...",
+              );
+            }
+          } else {
+            await sendMessage(
+              botToken,
+              chatId,
+              "Qwen OAuth is pending. Complete browser approval or run /provider cancel.",
+            );
+          }
+          continue;
+        }
+
         if (command === "/start") {
           const providerLabel = resolveProviderShortLabel(activeProviderId);
           await sendMessage(
@@ -1207,6 +1642,7 @@ export async function runTelegramBot(options = {}) {
               "Use /context to inspect stored context size.",
               "Use /usage to inspect usage limits (Codex only).",
               "Use /think to inspect or set reasoning effort.",
+              "Use /provider to inspect or switch provider.",
               "Use /models to list models, /model to inspect current model.",
             ].join("\n"),
           );
@@ -1326,6 +1762,152 @@ export async function runTelegramBot(options = {}) {
           };
           await saveConfig(config, configPath);
           await sendMessage(botToken, chatId, `Reasoning effort set to ${nextEffort}.`);
+          continue;
+        }
+
+        if (command === "/provider") {
+          const arg = resolveCommandArgs(text);
+          if (!arg) {
+            await sendMessage(
+              botToken,
+              chatId,
+              buildProviderCommandMessage({
+                config,
+                providerId: activeProviderId,
+                modelId: activeModelId,
+                pendingProviderOAuth,
+                chatId,
+                senderId,
+              }),
+            );
+            continue;
+          }
+
+          if (isProviderCancelArg(arg)) {
+            const pending = pendingProviderOAuth;
+            if (!pending) {
+              await sendMessage(
+                botToken,
+                chatId,
+                "No pending provider OAuth request.\nUse /provider to check current status.",
+              );
+              continue;
+            }
+            if (!ownsPendingProviderOAuth(pending, chatId, senderId)) {
+              await sendMessage(
+                botToken,
+                chatId,
+                "Another sender is handling provider OAuth right now. Wait for completion.",
+              );
+              continue;
+            }
+            clearPendingProviderOAuth(pending);
+            pending.canceled = true;
+            if (pending.kind === "codex-callback") {
+              pending.session?.cancel("OAuth canceled by user.");
+            }
+            await sendMessage(
+              botToken,
+              chatId,
+              `Canceled pending ${resolveProviderShortLabel(pending.providerId)} OAuth request.`,
+            );
+            continue;
+          }
+
+          const selectedProviderId = resolveProviderSelection(arg);
+          if (!selectedProviderId) {
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                `Unknown provider: ${trim(arg)}`,
+                "",
+                buildProviderCommandMessage({
+                  config,
+                  providerId: activeProviderId,
+                  modelId: activeModelId,
+                  pendingProviderOAuth,
+                  chatId,
+                  senderId,
+                }),
+              ].join("\n"),
+            );
+            continue;
+          }
+
+          if (pendingProviderOAuth) {
+            if (ownsPendingProviderOAuth(pendingProviderOAuth, chatId, senderId)) {
+              await sendMessage(
+                botToken,
+                chatId,
+                [
+                  `${resolveProviderShortLabel(pendingProviderOAuth.providerId)} OAuth is already in progress.`,
+                  pendingProviderOAuth.kind === "codex-callback"
+                    ? "Paste callback URL as your next non-command message, or run /provider cancel."
+                    : "Complete browser approval, or run /provider cancel.",
+                ].join("\n"),
+              );
+            } else {
+              await sendMessage(
+                botToken,
+                chatId,
+                "Another sender is already running provider OAuth. Wait for completion.",
+              );
+            }
+            continue;
+          }
+
+          const existingOAuth = resolveProviderOAuth(config, selectedProviderId);
+          if (existingOAuth && trim(existingOAuth.access)) {
+            try {
+              const switched = await applyProviderSwitch({
+                providerId: selectedProviderId,
+                oauthCredentials: existingOAuth,
+              });
+              await sendMessage(
+                botToken,
+                chatId,
+                buildProviderUpdatedMessage(
+                  config,
+                  switched.providerId,
+                  switched.modelId,
+                  switched.unchanged,
+                ),
+              );
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Provider switch failed: ${trim(error?.message) || "unknown error"}`,
+              );
+            }
+            continue;
+          }
+
+          try {
+            if (selectedProviderId === QWEN_PROVIDER_ID) {
+              await startQwenProviderOAuth({
+                providerId: selectedProviderId,
+                chatId,
+                senderId,
+              });
+            } else if (selectedProviderId === CODEX_PROVIDER_ID) {
+              await startCodexProviderOAuth({
+                providerId: selectedProviderId,
+                chatId,
+                senderId,
+              });
+            } else {
+              await sendMessage(botToken, chatId, `Unsupported provider: ${selectedProviderId}`);
+            }
+          } catch (error) {
+            clearPendingProviderOAuth();
+            await sendMessage(
+              botToken,
+              chatId,
+              `Failed to start provider OAuth: ${trim(error?.message) || "unknown error"}`,
+            );
+          }
           continue;
         }
 
