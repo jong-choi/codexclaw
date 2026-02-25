@@ -14,7 +14,13 @@ services:
       CODEXCLAW_WORKSPACE_TEMPLATE_ROOT: /app/.codexclaw/initial-workspace
     volumes:
       - codexclaw_data:/home/node/.codexclaw
-    command: ["sh", "-lc", "sleep infinity"]
+    command: ["idle"]
+    networks:
+      - codexclaw_shared
 
 volumes:
   codexclaw_data:
+
+networks:
+  codexclaw_shared:
+    name: codexclaw_shared

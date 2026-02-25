@@ -10,22 +10,34 @@ import {
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
   CODEX_PROVIDER_ID,
+  OLLAMA_PROVIDER_ID,
   QWEN_PROVIDER_ID,
   TELEGRAM_API_BASE_URL,
 } from "./constants.mjs";
 import {
+  assignProviderConnection,
   assignModelSelection,
   assignProviderOAuth,
   ensureProviderState,
   listModelProviders,
   normalizeProviderModelId,
+  providerRequiresOAuth,
   providerSupportsUsageSnapshot,
   resolveConfiguredProviderId,
+  resolveProviderConnection,
   resolveModelRef,
   resolveProviderModelIds,
   resolveProviderOAuth,
   resolveProviderShortLabel,
 } from "./model-provider.mjs";
+import {
+  buildOllamaEndpointHintLines,
+  deleteOllamaModel,
+  listOllamaModels,
+  normalizeOllamaBaseUrl,
+  pullOllamaModel,
+  resolveOllamaBaseUrlFromConfig,
+} from "./ollama.mjs";
 import {
   beginQwenDeviceOAuth,
   createCodexCallbackOAuthSession,
@@ -87,6 +99,7 @@ const TELEGRAM_BOT_COMMANDS = [
   { command: "provider", description: "Show or switch provider (/provider <id|alias|number>)" },
   { command: "models", description: "List available models for current provider" },
   { command: "model", description: "Show or switch model (/model <id|number>)" },
+  { command: "ollama", description: "Manage Ollama models (/ollama list|pull|rm)" },
 ];
 
 const PROVIDER_CANCEL_TOKENS = new Set(["cancel", "abort", "stop"]);
@@ -98,6 +111,7 @@ const PROVIDER_ALIAS_TO_ID = new Map([
   ["qwen", QWEN_PROVIDER_ID],
   ["qwen-portal", QWEN_PROVIDER_ID],
   ["qwen_portal", QWEN_PROVIDER_ID],
+  ["ollama", OLLAMA_PROVIDER_ID],
 ]);
 
 function isInlineExitCommand(value) {
@@ -581,6 +595,10 @@ function buildUsageReport(snapshot) {
   return formatCodexUsageLines(snapshot).join("\n");
 }
 
+function formatCurrentModelRef(providerId, modelId) {
+  return resolveModelRef(providerId, modelId) || "(not set)";
+}
+
 function buildModelStatusMessage(config, providerId, modelId, usageLines) {
   const providerShortLabel = resolveProviderShortLabel(providerId);
   const lines =
@@ -592,7 +610,7 @@ function buildModelStatusMessage(config, providerId, modelId, usageLines) {
   const reasoningEffort = resolveReasoningEffort(config);
   return [
     `Current provider: ${providerShortLabel}`,
-    `Current model: ${resolveModelRef(providerId, modelId)}`,
+    `Current model: ${formatCurrentModelRef(providerId, modelId)}`,
     `Reasoning effort: ${reasoningEffort}`,
     "",
     ...lines,
@@ -620,8 +638,10 @@ async function resolveFreshProviderSessionAccess(params) {
   };
 }
 
-function buildModelListMessage(providerId, currentModelId) {
-  const modelIds = resolveProviderModelIds(providerId);
+function buildModelListMessage(params) {
+  const providerId = trim(params?.providerId);
+  const currentModelId = trim(params?.currentModelId);
+  const modelIds = Array.isArray(params?.modelIds) ? params.modelIds : [];
   const providerShortLabel = resolveProviderShortLabel(providerId);
   const normalizedCurrent = normalizeProviderModelId(providerId, currentModelId);
   const lines = [`Available ${providerShortLabel} models:`];
@@ -637,9 +657,19 @@ function buildModelListMessage(providerId, currentModelId) {
   return lines.join("\n");
 }
 
-function resolveModelSelection(providerId, value) {
-  const modelIds = resolveProviderModelIds(providerId);
-  const raw = trim(value).toLowerCase();
+async function resolveProviderModelIdsRuntime(providerId, config) {
+  const resolvedProviderId = trim(providerId);
+  if (resolvedProviderId === OLLAMA_PROVIDER_ID) {
+    const baseUrl = resolveOllamaBaseUrlFromConfig(config);
+    return await listOllamaModels({ baseUrl });
+  }
+  return resolveProviderModelIds(resolvedProviderId);
+}
+
+function resolveModelSelection(params) {
+  const providerId = trim(params?.providerId);
+  const modelIds = Array.isArray(params?.modelIds) ? params.modelIds : [];
+  const raw = trim(params?.value).toLowerCase();
   if (!raw) {
     return "";
   }
@@ -658,7 +688,7 @@ function resolveModelSelection(providerId, value) {
     const maybeProvider = trim(candidate.slice(0, slash));
     if (maybeProvider === providerId) {
       candidate = trim(candidate.slice(slash + 1));
-    } else {
+    } else if (providerId !== OLLAMA_PROVIDER_ID) {
       candidate = candidate.slice(candidate.lastIndexOf("/") + 1);
     }
   }
@@ -723,16 +753,282 @@ function resolveProviderSelection(value) {
   return "";
 }
 
-function resolveProviderTargetModelId(providerId, currentModelId) {
-  const modelIds = resolveProviderModelIds(providerId);
-  if (modelIds.length === 0) {
+function resolveProviderTargetModelId(providerId, currentModelId, modelIds) {
+  const resolvedModelIds = Array.isArray(modelIds) ? modelIds : [];
+  if (resolvedModelIds.length === 0) {
     return "";
   }
   const normalizedCurrent = normalizeProviderModelId(providerId, currentModelId);
-  if (normalizedCurrent && modelIds.includes(normalizedCurrent)) {
+  if (normalizedCurrent && resolvedModelIds.includes(normalizedCurrent)) {
     return normalizedCurrent;
   }
-  return modelIds[0];
+  return resolvedModelIds[0];
+}
+
+function resolveOllamaStatusSuffix(config) {
+  const connection = resolveProviderConnection(config, OLLAMA_PROVIDER_ID);
+  const baseUrl = trim(connection?.baseUrl);
+  if (baseUrl) {
+    return `endpoint ${baseUrl}`;
+  }
+  return "endpoint required";
+}
+
+function buildOllamaEndpointPrompt() {
+  return [
+    "Enter Ollama base URL as your next non-command message.",
+    ...buildOllamaEndpointHintLines(),
+    "Examples: http://ollama:11434, http://127.0.0.1:11434",
+    "Use /provider cancel to abort.",
+  ].join("\n");
+}
+
+function parseOllamaCommandArgs(text) {
+  const raw = trim(text);
+  const arg = resolveCommandArgs(raw);
+  if (!arg) {
+    return { command: "", value: "" };
+  }
+  const firstSpace = arg.indexOf(" ");
+  if (firstSpace < 0) {
+    return { command: arg.toLowerCase(), value: "" };
+  }
+  return {
+    command: trim(arg.slice(0, firstSpace)).toLowerCase(),
+    value: trim(arg.slice(firstSpace + 1)),
+  };
+}
+
+function buildOllamaCommandHelp() {
+  return [
+    "Ollama commands:",
+    "/ollama list",
+    "/ollama pull <model>",
+    "/ollama rm <model>",
+    "",
+    "Examples:",
+    "/ollama pull gpt-oss:20b",
+    "/ollama rm gpt-oss:20b",
+  ].join("\n");
+}
+
+function formatBytes(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return "";
+  }
+  if (num < 1024) {
+    return `${Math.round(num)} B`;
+  }
+  const kb = num / 1024;
+  if (kb < 1024) {
+    return `${kb.toFixed(1)} KB`;
+  }
+  const mb = kb / 1024;
+  if (mb < 1024) {
+    return `${mb.toFixed(1)} MB`;
+  }
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
+}
+
+async function handleOllamaCommand(params) {
+  const botToken = params?.botToken;
+  const chatId = params?.chatId;
+  const activeProviderId = params?.activeProviderId;
+  const activeModelId = params?.activeModelId;
+  const config = params?.config;
+  const configPath = params?.configPath;
+  const args = parseOllamaCommandArgs(params?.text);
+
+  if (!args.command || args.command === "help") {
+    await sendMessage(botToken, chatId, buildOllamaCommandHelp());
+    return {
+      handled: true,
+      activeModelId,
+    };
+  }
+
+  const baseUrl = resolveOllamaBaseUrlFromConfig(config);
+
+  if (args.command === "list") {
+    try {
+      const models = await listOllamaModels({ baseUrl });
+      if (models.length === 0) {
+        await sendMessage(
+          botToken,
+          chatId,
+          `No Ollama models found on ${baseUrl}.\nPull one first: /ollama pull gpt-oss:20b`,
+        );
+        return { handled: true, activeModelId };
+      }
+      const lines = [`Ollama models (${baseUrl}):`];
+      const normalizedCurrent =
+        activeProviderId === OLLAMA_PROVIDER_ID
+          ? normalizeProviderModelId(OLLAMA_PROVIDER_ID, activeModelId)
+          : "";
+      for (let i = 0; i < models.length; i += 1) {
+        const model = models[i];
+        const current = model === normalizedCurrent ? " (current)" : "";
+        lines.push(`${i + 1}. ${model}${current}`);
+      }
+      lines.push("");
+      lines.push("Use /model <id|number> after switching provider to ollama.");
+      await sendMessage(botToken, chatId, lines.join("\n"));
+    } catch (error) {
+      await sendMessage(
+        botToken,
+        chatId,
+        `Failed to list Ollama models: ${trim(error?.message) || "unknown error"}`,
+      );
+    }
+    return {
+      handled: true,
+      activeModelId,
+    };
+  }
+
+  if (args.command === "pull") {
+    const model = trim(args.value);
+    if (!model) {
+      await sendMessage(
+        botToken,
+        chatId,
+        ["Missing model name.", "Usage: /ollama pull <model>", "Example: /ollama pull gpt-oss:20b"].join("\n"),
+      );
+      return { handled: true, activeModelId };
+    }
+
+    const startMessage = await sendMessage(botToken, chatId, `Pulling Ollama model: ${model}`);
+    const statusMessageId = extractTelegramMessageId(startMessage);
+    let lastStatus = "";
+    let lastStatusAt = 0;
+    try {
+      await pullOllamaModel({
+        baseUrl,
+        model,
+        onProgress: async (event) => {
+          const now = Date.now();
+          const status = trim(event?.status) || "pulling";
+          const parts = [status];
+          if (Number.isFinite(Number(event?.completed)) && Number.isFinite(Number(event?.total))) {
+            const completed = Number(event.completed);
+            const total = Number(event.total);
+            const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+            const progress = `${percent}% (${formatBytes(completed)}/${formatBytes(total) || total})`;
+            parts.push(progress);
+          }
+          const nextStatus = parts.join(" · ");
+          if (nextStatus === lastStatus || now - lastStatusAt < 1500) {
+            return;
+          }
+          lastStatus = nextStatus;
+          lastStatusAt = now;
+          if (Number.isInteger(statusMessageId)) {
+            await editMessage(botToken, chatId, statusMessageId, `Pulling ${model}\n${nextStatus}`).catch(
+              () => {},
+            );
+          }
+        },
+      });
+      const models = await listOllamaModels({ baseUrl });
+      let nextActiveModelId = activeModelId;
+      if (activeProviderId === OLLAMA_PROVIDER_ID) {
+        const normalizedCurrent = normalizeProviderModelId(OLLAMA_PROVIDER_ID, activeModelId);
+        if (!normalizedCurrent || !models.includes(normalizedCurrent)) {
+          const fallbackModel = models.includes(model) ? model : models[0];
+          if (fallbackModel) {
+            assignModelSelection(config, OLLAMA_PROVIDER_ID, fallbackModel);
+            nextActiveModelId = fallbackModel;
+            config.telegram = {
+              ...config.telegram,
+            };
+            await saveConfig(config, configPath);
+          }
+        }
+      }
+      await sendMessage(
+        botToken,
+        chatId,
+        `Ollama pull completed: ${model}\nModels available: ${models.length}`,
+      );
+      return {
+        handled: true,
+        activeModelId: nextActiveModelId,
+      };
+    } catch (error) {
+      await sendMessage(
+        botToken,
+        chatId,
+        `Failed to pull model ${model}: ${trim(error?.message) || "unknown error"}`,
+      );
+      return { handled: true, activeModelId };
+    }
+  }
+
+  if (args.command === "rm" || args.command === "remove" || args.command === "delete") {
+    const model = trim(args.value);
+    if (!model) {
+      await sendMessage(
+        botToken,
+        chatId,
+        ["Missing model name.", "Usage: /ollama rm <model>", "Example: /ollama rm gpt-oss:20b"].join("\n"),
+      );
+      return { handled: true, activeModelId };
+    }
+    try {
+      await deleteOllamaModel({ baseUrl, model });
+      const models = await listOllamaModels({ baseUrl });
+      let nextActiveModelId = activeModelId;
+      if (activeProviderId === OLLAMA_PROVIDER_ID) {
+        const normalizedCurrent = normalizeProviderModelId(OLLAMA_PROVIDER_ID, activeModelId);
+        if (normalizedCurrent === model && models.length > 0) {
+          assignModelSelection(config, OLLAMA_PROVIDER_ID, models[0]);
+          nextActiveModelId = models[0];
+          await saveConfig(config, configPath);
+        }
+      }
+      await sendMessage(
+        botToken,
+        chatId,
+        `Deleted Ollama model: ${model}\nModels remaining: ${models.length}`,
+      );
+      return {
+        handled: true,
+        activeModelId: nextActiveModelId,
+      };
+    } catch (error) {
+      await sendMessage(
+        botToken,
+        chatId,
+        `Failed to delete model ${model}: ${trim(error?.message) || "unknown error"}`,
+      );
+      return { handled: true, activeModelId };
+    }
+  }
+
+  await sendMessage(
+    params?.botToken,
+    params?.chatId,
+    [`Unknown /ollama command: ${args.command}`, "", buildOllamaCommandHelp()].join("\n"),
+  );
+  return {
+    handled: true,
+    activeModelId,
+  };
+}
+
+function buildProviderPendingMessage(pending) {
+  if (!pending) {
+    return "";
+  }
+  if (pending.kind === "codex-callback") {
+    return "Paste callback URL as your next non-command message, or run /provider cancel.";
+  }
+  if (pending.kind === "ollama-base-url") {
+    return "Send Ollama base URL as your next non-command message, or run /provider cancel.";
+  }
+  return "Complete browser approval, or run /provider cancel.";
 }
 
 function buildProviderCommandMessage(params) {
@@ -749,7 +1045,7 @@ function buildProviderCommandMessage(params) {
 
   const lines = [
     `Current provider: ${resolveProviderShortLabel(currentProviderId)} (${currentProviderId})`,
-    `Current model: ${resolveModelRef(currentProviderId, currentModelId)}`,
+    `Current model: ${formatCurrentModelRef(currentProviderId, currentModelId)}`,
     `Reasoning effort: ${resolveReasoningEffort(params?.config)}`,
     "",
   ];
@@ -757,15 +1053,11 @@ function buildProviderCommandMessage(params) {
   if (pending) {
     const pendingProviderLabel = resolveProviderShortLabel(pending.providerId);
     const ownerLabel = ownsPending ? "this chat" : `chat ${trim(pending.chatId) || "unknown"}`;
-    lines.push(`Pending OAuth: ${pendingProviderLabel} (${ownerLabel})`);
+    lines.push(`Pending provider setup: ${pendingProviderLabel} (${ownerLabel})`);
     if (ownsPending) {
-      if (pending.kind === "codex-callback") {
-        lines.push("Paste callback URL as your next non-command message, or run /provider cancel.");
-      } else {
-        lines.push("Complete browser approval, or run /provider cancel.");
-      }
+      lines.push(buildProviderPendingMessage(pending));
     } else {
-      lines.push("Another session is already running provider OAuth.");
+      lines.push("Another session is already running provider setup.");
     }
     lines.push("");
   }
@@ -774,27 +1066,38 @@ function buildProviderCommandMessage(params) {
   for (let i = 0; i < providers.length; i += 1) {
     const provider = providers[i];
     const current = provider.id === currentProviderId ? " (current)" : "";
-    const oauthReady = Boolean(resolveProviderOAuth(params?.config, provider.id)?.access);
-    const oauthSuffix = oauthReady ? "oauth ready" : "oauth required";
-    lines.push(`${i + 1}. ${provider.shortLabel} (${provider.id})${current} - ${oauthSuffix}`);
+    const status = providerRequiresOAuth(provider.id)
+      ? Boolean(resolveProviderOAuth(params?.config, provider.id)?.access)
+        ? "oauth ready"
+        : "oauth required"
+      : resolveOllamaStatusSuffix(params?.config);
+    lines.push(`${i + 1}. ${provider.shortLabel} (${provider.id})${current} - ${status}`);
   }
   lines.push("");
   lines.push("Usage:");
   lines.push("/provider");
   lines.push("/provider <id|alias|number>");
   lines.push("/provider cancel");
-  lines.push("Aliases: codex, openai, qwen");
+  lines.push("Aliases: codex, openai, qwen, ollama");
   return lines.join("\n");
 }
 
 function buildProviderUpdatedMessage(config, providerId, modelId, unchanged = false) {
+  const connection = providerId === OLLAMA_PROVIDER_ID ? resolveProviderConnection(config, providerId) : null;
+  const endpointLine =
+    providerId === OLLAMA_PROVIDER_ID && trim(connection?.baseUrl)
+      ? `Ollama endpoint: ${trim(connection.baseUrl)}`
+      : null;
   return [
     unchanged ? "Provider unchanged." : "Provider updated.",
     `Current provider: ${resolveProviderShortLabel(providerId)} (${providerId})`,
-    `Current model: ${resolveModelRef(providerId, modelId)}`,
+    `Current model: ${formatCurrentModelRef(providerId, modelId)}`,
+    endpointLine,
     `Reasoning effort: ${resolveReasoningEffort(config)}`,
     "Use /models and /model <id|number> to manage model selection.",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function isResetCommand(token) {
@@ -825,14 +1128,16 @@ function isKnownChatCommand(token) {
     isReasoningCommand(token) ||
     token === "/provider" ||
     token === "/models" ||
-    token === "/model"
+    token === "/model" ||
+    token === "/ollama"
   );
 }
 
 function buildHelpMessage(providerId) {
   const providerShortLabel = resolveProviderShortLabel(providerId);
   const providerModelIds = resolveProviderModelIds(providerId);
-  const exampleModel = providerModelIds[0] || "<id>";
+  const exampleModel =
+    providerModelIds[0] || (providerId === OLLAMA_PROVIDER_ID ? "gpt-oss:20b" : "<id>");
   return [
     "CodexClaw Telegram commands",
     "",
@@ -841,23 +1146,26 @@ function buildHelpMessage(providerId) {
     "/context - Show stored context message count.",
     "/usage - Show live usage limits (Codex only).",
     "/think <level> - Set reasoning effort.",
-    "/provider - Show provider status and pending OAuth state.",
-    "/provider <id|alias|number> - Switch provider (starts OAuth only when needed).",
-    "/provider cancel - Cancel pending provider OAuth request.",
+    "/provider - Show provider status and pending setup state.",
+    "/provider <id|alias|number> - Switch provider (OAuth or Ollama endpoint setup).",
+    "/provider cancel - Cancel pending provider setup request.",
     "/models - List available models for current provider.",
     `/model - Show current provider/model (${providerShortLabel}) + reasoning + usage summary.`,
     "/model <id|number> - Switch model immediately.",
+    "/ollama list|pull|rm - Manage Ollama models.",
     "",
     `Reasoning levels: ${REASONING_EFFORT_LEVELS.join(", ")}`,
     "Think aliases: /thinking, /reasoning, /reason, /t",
     "",
     "Examples:",
     "/provider qwen",
+    "/provider ollama",
     "/provider 1",
     "/provider cancel",
     "/think medium",
     "/model 1",
     `/model ${exampleModel}`,
+    "/ollama pull gpt-oss:20b",
     "",
     "If a command fails, run /help and follow the exact format above.",
   ].join("\n");
@@ -1100,6 +1408,7 @@ async function runDueScheduledJobs(params) {
         accessToken: fresh.accessToken,
         providerId: params?.providerId,
         modelId: params?.modelId,
+        providerConnection: resolveProviderConnection(params?.config, params?.providerId),
         reasoningEffort: resolveReasoningEffort(params?.config),
         instructions: params?.codexInstructions,
         workspaceRoot: resolveRuntimeWorkspaceRoot(params?.config),
@@ -1178,11 +1487,17 @@ export async function runTelegramBot(options = {}) {
   let activeProviderId = providerState.providerId;
   let activeModelId = providerState.modelId;
   if (!activeModelId) {
-    throw new Error("model selection is missing. Run `codexclaw onboard`.");
+    if (activeProviderId === OLLAMA_PROVIDER_ID) {
+      process.stdout.write(
+        "No Ollama model selected yet. Use /ollama pull gpt-oss:20b and /model <id|number> in Telegram.\n",
+      );
+    } else {
+      throw new Error("model selection is missing. Run `codexclaw onboard`.");
+    }
   }
 
   let oauth = resolveProviderOAuth(config, activeProviderId);
-  if (!oauth || typeof oauth !== "object") {
+  if (providerRequiresOAuth(activeProviderId) && (!oauth || typeof oauth !== "object")) {
     throw new Error(`${resolveProviderShortLabel(activeProviderId)} OAuth is missing. Run \`codexclaw onboard\`.`);
   }
 
@@ -1225,21 +1540,30 @@ export async function runTelegramBot(options = {}) {
     }
   };
 
-  const applyProviderSwitch = async ({ providerId, oauthCredentials }) => {
+  const applyProviderSwitch = async ({ providerId, oauthCredentials, modelIds }) => {
     const nextProviderId = trim(providerId) || activeProviderId;
+    const needsOAuth = providerRequiresOAuth(nextProviderId);
     const nextOauth =
       oauthCredentials && typeof oauthCredentials === "object" ? { ...oauthCredentials } : null;
-    if (!nextOauth || !trim(nextOauth.access)) {
+    if (needsOAuth && (!nextOauth || !trim(nextOauth.access))) {
       throw new Error(`${resolveProviderShortLabel(nextProviderId)} OAuth credentials are missing.`);
     }
 
-    const nextModelId = resolveProviderTargetModelId(nextProviderId, activeModelId);
+    const resolvedModelIds =
+      Array.isArray(modelIds) && modelIds.length > 0
+        ? modelIds
+        : await resolveProviderModelIdsRuntime(nextProviderId, config);
+    const nextModelId = resolveProviderTargetModelId(nextProviderId, activeModelId, resolvedModelIds);
     if (!nextModelId) {
       throw new Error(`No models are registered for provider ${nextProviderId}.`);
     }
 
     const unchanged = nextProviderId === activeProviderId && nextModelId === activeModelId;
-    assignProviderOAuth(config, nextProviderId, nextOauth);
+    if (needsOAuth) {
+      assignProviderOAuth(config, nextProviderId, nextOauth);
+    } else {
+      assignProviderOAuth(config, nextProviderId, null);
+    }
     const modelAssigned = assignModelSelection(config, nextProviderId, nextModelId);
     if (!modelAssigned) {
       throw new Error(`Failed to assign model ${nextModelId} for provider ${nextProviderId}.`);
@@ -1247,7 +1571,7 @@ export async function runTelegramBot(options = {}) {
 
     activeProviderId = nextProviderId;
     activeModelId = nextModelId;
-    oauth = nextOauth;
+    oauth = needsOAuth ? nextOauth : null;
     config.telegram = {
       ...config.telegram,
       offset,
@@ -1264,6 +1588,30 @@ export async function runTelegramBot(options = {}) {
       modelId: activeModelId,
       unchanged,
     };
+  };
+
+  const startOllamaProviderSetup = async ({ providerId, chatId, senderId, initialBaseUrl }) => {
+    const fallbackBaseUrl = resolveOllamaBaseUrlFromConfig(config);
+    const pending = {
+      kind: "ollama-base-url",
+      providerId,
+      chatId,
+      senderId,
+      suggestedBaseUrl: normalizeOllamaBaseUrl(initialBaseUrl || fallbackBaseUrl),
+      canceled: false,
+    };
+    pendingProviderOAuth = pending;
+    process.stdout.write(`Started Ollama provider setup for chat ${chatId} (sender ${senderId}).\n`);
+
+    await sendMessage(
+      botToken,
+      chatId,
+      [
+        "Ollama provider setup started.",
+        `Current endpoint: ${pending.suggestedBaseUrl}`,
+        buildOllamaEndpointPrompt(),
+      ].join("\n"),
+    );
   };
 
   const startQwenProviderOAuth = async ({ providerId, chatId, senderId }) => {
@@ -1600,10 +1948,8 @@ export async function runTelegramBot(options = {}) {
             botToken,
             chatId,
             [
-              `${resolveProviderShortLabel(senderPendingProviderOAuth.providerId)} OAuth is in progress.`,
-              senderPendingProviderOAuth.kind === "codex-callback"
-                ? "Paste callback URL as your next non-command message, or run /provider cancel."
-                : "Complete browser approval, or run /provider cancel.",
+              `${resolveProviderShortLabel(senderPendingProviderOAuth.providerId)} setup is in progress.`,
+              buildProviderPendingMessage(senderPendingProviderOAuth),
             ].join("\n"),
           );
           continue;
@@ -1618,6 +1964,72 @@ export async function runTelegramBot(options = {}) {
                 botToken,
                 chatId,
                 "Callback URL received. Completing OpenAI Codex OAuth...",
+              );
+            }
+          } else if (senderPendingProviderOAuth.kind === "ollama-base-url") {
+            let normalizedBaseUrl;
+            try {
+              normalizedBaseUrl = normalizeOllamaBaseUrl(text);
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Invalid Ollama URL: ${trim(error?.message) || "unknown error"}\n${buildOllamaEndpointPrompt()}`,
+              );
+              continue;
+            }
+
+            senderPendingProviderOAuth.suggestedBaseUrl = normalizedBaseUrl;
+            let discoveredModels;
+            try {
+              discoveredModels = await listOllamaModels({ baseUrl: normalizedBaseUrl });
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Failed to connect Ollama: ${trim(error?.message) || "unknown error"}\n${buildOllamaEndpointPrompt()}`,
+              );
+              continue;
+            }
+
+            if (!Array.isArray(discoveredModels) || discoveredModels.length === 0) {
+              await sendMessage(
+                botToken,
+                chatId,
+                [
+                  `Connected to Ollama (${normalizedBaseUrl}) but no models were found.`,
+                  "Pull a model first (example: /ollama pull gpt-oss:20b) and then send the URL again.",
+                  "Use /provider cancel to abort.",
+                ].join("\n"),
+              );
+              continue;
+            }
+
+            assignProviderConnection(config, OLLAMA_PROVIDER_ID, {
+              baseUrl: normalizedBaseUrl,
+            });
+            try {
+              const switched = await applyProviderSwitch({
+                providerId: OLLAMA_PROVIDER_ID,
+                oauthCredentials: null,
+                modelIds: discoveredModels,
+              });
+              clearPendingProviderOAuth(senderPendingProviderOAuth);
+              await sendMessage(
+                botToken,
+                chatId,
+                buildProviderUpdatedMessage(
+                  config,
+                  switched.providerId,
+                  switched.modelId,
+                  switched.unchanged,
+                ),
+              );
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Failed to activate Ollama provider: ${trim(error?.message) || "unknown error"}`,
               );
             }
           } else {
@@ -1644,6 +2056,7 @@ export async function runTelegramBot(options = {}) {
               "Use /think to inspect or set reasoning effort.",
               "Use /provider to inspect or switch provider.",
               "Use /models to list models, /model to inspect current model.",
+              "Use /ollama list|pull|rm to manage Ollama models.",
             ].join("\n"),
           );
           continue;
@@ -1789,7 +2202,7 @@ export async function runTelegramBot(options = {}) {
               await sendMessage(
                 botToken,
                 chatId,
-                "No pending provider OAuth request.\nUse /provider to check current status.",
+                "No pending provider setup request.\nUse /provider to check current status.",
               );
               continue;
             }
@@ -1797,7 +2210,7 @@ export async function runTelegramBot(options = {}) {
               await sendMessage(
                 botToken,
                 chatId,
-                "Another sender is handling provider OAuth right now. Wait for completion.",
+                "Another sender is handling provider setup right now. Wait for completion.",
               );
               continue;
             }
@@ -1809,7 +2222,7 @@ export async function runTelegramBot(options = {}) {
             await sendMessage(
               botToken,
               chatId,
-              `Canceled pending ${resolveProviderShortLabel(pending.providerId)} OAuth request.`,
+              `Canceled pending ${resolveProviderShortLabel(pending.providerId)} setup request.`,
             );
             continue;
           }
@@ -1841,24 +2254,42 @@ export async function runTelegramBot(options = {}) {
                 botToken,
                 chatId,
                 [
-                  `${resolveProviderShortLabel(pendingProviderOAuth.providerId)} OAuth is already in progress.`,
-                  pendingProviderOAuth.kind === "codex-callback"
-                    ? "Paste callback URL as your next non-command message, or run /provider cancel."
-                    : "Complete browser approval, or run /provider cancel.",
+                  `${resolveProviderShortLabel(pendingProviderOAuth.providerId)} setup is already in progress.`,
+                  buildProviderPendingMessage(pendingProviderOAuth),
                 ].join("\n"),
               );
             } else {
               await sendMessage(
                 botToken,
                 chatId,
-                "Another sender is already running provider OAuth. Wait for completion.",
+                "Another sender is already running provider setup. Wait for completion.",
               );
             }
             continue;
           }
 
+          if (selectedProviderId === OLLAMA_PROVIDER_ID) {
+            try {
+              await startOllamaProviderSetup({
+                providerId: selectedProviderId,
+                chatId,
+                senderId,
+                initialBaseUrl: resolveProviderConnection(config, OLLAMA_PROVIDER_ID)?.baseUrl,
+              });
+            } catch (error) {
+              clearPendingProviderOAuth();
+              await sendMessage(
+                botToken,
+                chatId,
+                `Failed to start Ollama setup: ${trim(error?.message) || "unknown error"}`,
+              );
+            }
+            continue;
+          }
+
+          const selectedRequiresOAuth = providerRequiresOAuth(selectedProviderId);
           const existingOAuth = resolveProviderOAuth(config, selectedProviderId);
-          if (existingOAuth && trim(existingOAuth.access)) {
+          if (selectedRequiresOAuth && existingOAuth && trim(existingOAuth.access)) {
             try {
               const switched = await applyProviderSwitch({
                 providerId: selectedProviderId,
@@ -1898,14 +2329,14 @@ export async function runTelegramBot(options = {}) {
                 senderId,
               });
             } else {
-              await sendMessage(botToken, chatId, `Unsupported provider: ${selectedProviderId}`);
+              await sendMessage(botToken, chatId, `Unsupported provider setup flow: ${selectedProviderId}`);
             }
           } catch (error) {
             clearPendingProviderOAuth();
             await sendMessage(
               botToken,
               chatId,
-              `Failed to start provider OAuth: ${trim(error?.message) || "unknown error"}`,
+              `Failed to start provider setup: ${trim(error?.message) || "unknown error"}`,
             );
           }
           continue;
@@ -1925,7 +2356,32 @@ export async function runTelegramBot(options = {}) {
             );
             continue;
           }
-          await sendMessage(botToken, chatId, buildModelListMessage(activeProviderId, activeModelId));
+          try {
+            const providerModelIds = await resolveProviderModelIdsRuntime(activeProviderId, config);
+            if (!Array.isArray(providerModelIds) || providerModelIds.length === 0) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `No models are available for ${resolveProviderShortLabel(activeProviderId)} right now.`,
+              );
+              continue;
+            }
+            await sendMessage(
+              botToken,
+              chatId,
+              buildModelListMessage({
+                providerId: activeProviderId,
+                currentModelId: activeModelId,
+                modelIds: providerModelIds,
+              }),
+            );
+          } catch (error) {
+            await sendMessage(
+              botToken,
+              chatId,
+              `Failed to load model list: ${trim(error?.message) || "unknown error"}`,
+            );
+          }
           continue;
         }
 
@@ -1967,9 +2423,23 @@ export async function runTelegramBot(options = {}) {
             );
             continue;
           }
-          const selectedModelId = resolveModelSelection(activeProviderId, arg);
+          let providerModelIds = [];
+          try {
+            providerModelIds = await resolveProviderModelIdsRuntime(activeProviderId, config);
+          } catch (error) {
+            await sendMessage(
+              botToken,
+              chatId,
+              `Failed to load models for selection: ${trim(error?.message) || "unknown error"}`,
+            );
+            continue;
+          }
+          const selectedModelId = resolveModelSelection({
+            providerId: activeProviderId,
+            modelIds: providerModelIds,
+            value: arg,
+          });
           if (!selectedModelId) {
-            const providerModelIds = resolveProviderModelIds(activeProviderId);
             await sendMessage(
               botToken,
               chatId,
@@ -2004,6 +2474,22 @@ export async function runTelegramBot(options = {}) {
           continue;
         }
 
+        if (command === "/ollama") {
+          const handled = await handleOllamaCommand({
+            text,
+            botToken,
+            chatId,
+            activeProviderId,
+            activeModelId,
+            config,
+            configPath,
+          });
+          if (handled?.activeModelId && handled.activeModelId !== activeModelId) {
+            activeModelId = handled.activeModelId;
+          }
+          continue;
+        }
+
         if (command && command.startsWith("/") && !isKnownChatCommand(command)) {
           await sendMessage(
             botToken,
@@ -2013,6 +2499,21 @@ export async function runTelegramBot(options = {}) {
               "Use /help to see available commands and exact usage.",
             ].join("\n"),
           );
+          continue;
+        }
+
+        if (!activeModelId) {
+          const guidance =
+            activeProviderId === OLLAMA_PROVIDER_ID
+              ? [
+                  "No Ollama model is selected yet.",
+                  "Run /ollama pull gpt-oss:20b, then /models and /model <id|number>.",
+                ].join("\n")
+              : [
+                  `No model is selected for ${resolveProviderShortLabel(activeProviderId)}.`,
+                  "Use /models and /model <id|number> first.",
+                ].join("\n");
+          await sendMessage(botToken, chatId, guidance);
           continue;
         }
 
@@ -2081,6 +2582,7 @@ export async function runTelegramBot(options = {}) {
             accessToken: fresh.accessToken,
             providerId: activeProviderId,
             modelId: activeModelId,
+            providerConnection: resolveProviderConnection(config, activeProviderId),
             reasoningEffort: resolveReasoningEffort(config),
             instructions: codexInstructions,
             workspaceRoot: resolveRuntimeWorkspaceRoot(config),

@@ -1,0 +1,19 @@
+services:
+  ollama:
+    image: ollama/ollama:0.11.10
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    networks:
+      - codexclaw_shared
+
+volumes:
+  ollama:
+
+networks:
+  codexclaw_shared:
+    name: codexclaw_shared
+    external: true

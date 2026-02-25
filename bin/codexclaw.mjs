@@ -8,17 +8,19 @@ function trim(value) {
 function printHelp() {
   process.stdout.write(
     [
-      "tele-codex - minimal Codex/Qwen + Telegram bridge",
+      "tele-codex - minimal Codex/Qwen/Ollama + Telegram bridge",
       "",
       "Usage:",
       "  tele-codex onboard [--config <path>]",
       "  tele-codex telegram run [--config <path>]",
       "  tele-codex config show [--config <path>]",
+      "  tele-codex idle",
       "",
       "Notes:",
-      "  - onboard: provider OAuth + model select + telegram setup + optional Notion/web/scheduler skill setup",
+      "  - onboard: provider setup (OAuth or Ollama endpoint) + model select + telegram setup + optional Notion/web/scheduler skill setup",
       "  - telegram run: start long-polling bot",
-      "  - in Telegram: /help shows command usage, /new resets context, /context shows history size, /usage shows live limit windows (e.g. 5h/1w), /think manages reasoning effort, /models and /model manage model",
+      "  - idle: keep container process alive (for docker compose utility service)",
+      "  - in Telegram: /help shows command usage, /new resets context, /context shows history size, /usage shows live limit windows (e.g. 5h/1w), /think manages reasoning effort, /models and /model manage model, /ollama manages Ollama models",
       "  - in bot terminal: bye or exit stops telegram run (/bye, /exit also work)",
       "  - bot proactively sends status updates (disable with telegram.proactiveStatus=false)",
     ].join("\n"),
@@ -142,6 +144,18 @@ async function main() {
       return;
     }
     process.stdout.write(`${JSON.stringify(redactConfig(loaded.config), null, 2)}\n`);
+    return;
+  }
+
+  if (command === "idle") {
+    const timer = setInterval(() => {}, 60_000);
+    const stop = () => {
+      clearInterval(timer);
+      process.exit(0);
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    process.stdout.write("idle mode started\n");
     return;
   }
 

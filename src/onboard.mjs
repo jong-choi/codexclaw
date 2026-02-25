@@ -3,25 +3,37 @@ import {
   BRAVE_API_ENV_NAME,
   NOTION_API_ENV_NAME,
   NOTION_SKILL_KEY,
+  OLLAMA_API_BASE_URL,
+  OLLAMA_PROVIDER_ID,
+  QWEN_PROVIDER_ID,
   SCHEDULER_SKILL_KEY,
   WORKSPACE_TEMPLATE_ROOT_DIR,
   WEB_FETCH_SKILL_KEY,
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
 import {
+  assignProviderConnection,
   assignModelSelection,
   assignProviderOAuth,
   ensureProviderState,
   listModelProviders,
+  providerRequiresOAuth,
   resolveConfiguredModelSelection,
   resolveConfiguredProviderId,
   resolveModelRef,
+  resolveProviderConnection,
   resolveProviderLabel,
   resolveProviderModelIds,
   resolveProviderOAuth,
   resolveProviderShortLabel,
 } from "./model-provider.mjs";
 import { loginProviderOAuth } from "./oauth.mjs";
+import {
+  buildOllamaEndpointHintLines,
+  listOllamaModels,
+  normalizeOllamaBaseUrl,
+  validateOllamaBaseUrl,
+} from "./ollama.mjs";
 import { withPrompter } from "./prompt.mjs";
 import {
   ensureWorkspaceInitialized,
@@ -114,6 +126,16 @@ function resolveConfiguredWorkspaceTemplateRoot(config) {
   return resolveWorkspaceTemplateRoot(WORKSPACE_TEMPLATE_ROOT_DIR);
 }
 
+function resolveConfiguredOllamaBaseUrl(config) {
+  const connection = resolveProviderConnection(config, OLLAMA_PROVIDER_ID);
+  const fromConfig = trim(connection?.baseUrl);
+  try {
+    return normalizeOllamaBaseUrl(fromConfig || OLLAMA_API_BASE_URL, OLLAMA_API_BASE_URL);
+  } catch {
+    return normalizeOllamaBaseUrl(OLLAMA_API_BASE_URL, OLLAMA_API_BASE_URL);
+  }
+}
+
 export async function runOnboard(options = {}) {
   const loaded = await loadConfig(options.configPath);
   const existingRaw = loaded.config ?? {};
@@ -146,9 +168,9 @@ export async function runOnboard(options = {}) {
     prompter.note(
       [
         "This setup includes only 7 steps:",
-        "1) Choose auth provider (OpenAI Codex or Qwen)",
-        "2) Provider OAuth login",
-        "3) Choose one model from selected provider",
+        "1) Choose provider (OpenAI Codex, Qwen, or Ollama)",
+        "2) Provider auth/setup (OAuth or Ollama endpoint)",
+        "3) Choose one model (or defer for Ollama when no model is pulled yet)",
         "4) Configure Telegram bot",
         "5) Optional: configure Notion skill API key",
         "6) Optional: configure web_search/web_fetch skills",
@@ -160,64 +182,128 @@ export async function runOnboard(options = {}) {
     const currentProviderId = resolveConfiguredProviderId(next);
     const providerOptions = listModelProviders().map((provider) => ({
       value: provider.id,
-      label: `${provider.label} (OAuth)`,
-      hint:
-        provider.id === currentProviderId
-          ? "current"
-          : provider.id === "qwen-portal"
-            ? "device-code login"
+      label: providerRequiresOAuth(provider.id) ? `${provider.label} (OAuth)` : provider.label,
+      hint: provider.id === currentProviderId
+        ? "current"
+        : provider.id === QWEN_PROVIDER_ID
+          ? "device-code login"
+          : provider.id === OLLAMA_PROVIDER_ID
+            ? "local/remote endpoint"
             : "ChatGPT OAuth login",
     }));
 
     const selectedProviderId = await prompter.select({
-      message: "Auth provider",
+      message: "Provider",
       options: providerOptions,
     });
     const selectedProviderLabel = resolveProviderLabel(selectedProviderId);
     const selectedProviderShortLabel = resolveProviderShortLabel(selectedProviderId);
+    const requiresOAuth = providerRequiresOAuth(selectedProviderId);
+    let modelIds = resolveProviderModelIds(selectedProviderId);
 
-    const existingOAuth = resolveProviderOAuth(next, selectedProviderId);
-    const hasExistingOAuth = Boolean(existingOAuth?.access);
-    let shouldRunOAuth = true;
-    if (hasExistingOAuth) {
-      shouldRunOAuth = !(await prompter.confirm({
-        message: `Existing ${selectedProviderShortLabel} OAuth found. Keep it?`,
-        initialValue: true,
-      }));
-    }
-
-    if (shouldRunOAuth) {
-      const oauth = await loginProviderOAuth({
-        providerId: selectedProviderId,
-        prompter,
-        log: (line) => process.stdout.write(`${line}\n`),
-        error: (line) => process.stderr.write(`${line}\n`),
-      });
-
-      if (!oauth) {
-        throw new Error(`${selectedProviderLabel} OAuth did not return credentials.`);
+    if (requiresOAuth) {
+      const existingOAuth = resolveProviderOAuth(next, selectedProviderId);
+      const hasExistingOAuth = Boolean(existingOAuth?.access);
+      let shouldRunOAuth = true;
+      if (hasExistingOAuth) {
+        shouldRunOAuth = !(await prompter.confirm({
+          message: `Existing ${selectedProviderShortLabel} OAuth found. Keep it?`,
+          initialValue: true,
+        }));
       }
-      assignProviderOAuth(next, selectedProviderId, oauth);
-    } else if (existingOAuth) {
-      assignProviderOAuth(next, selectedProviderId, existingOAuth);
+
+      if (shouldRunOAuth) {
+        const oauth = await loginProviderOAuth({
+          providerId: selectedProviderId,
+          prompter,
+          log: (line) => process.stdout.write(`${line}\n`),
+          error: (line) => process.stderr.write(`${line}\n`),
+        });
+
+        if (!oauth) {
+          throw new Error(`${selectedProviderLabel} OAuth did not return credentials.`);
+        }
+        assignProviderOAuth(next, selectedProviderId, oauth);
+      } else if (existingOAuth) {
+        assignProviderOAuth(next, selectedProviderId, existingOAuth);
+      }
+    } else if (selectedProviderId === OLLAMA_PROVIDER_ID) {
+      let suggestedBaseUrl = resolveConfiguredOllamaBaseUrl(next);
+      while (true) {
+        prompter.note(
+          buildOllamaEndpointHintLines().join("\n"),
+          "Ollama base URL",
+        );
+        const rawBaseUrl = await prompter.text({
+          message: "Ollama base URL",
+          required: true,
+          initialValue: suggestedBaseUrl,
+          validate: validateOllamaBaseUrl,
+        });
+        const normalizedBaseUrl = normalizeOllamaBaseUrl(rawBaseUrl, OLLAMA_API_BASE_URL);
+
+        try {
+          const discovered = await listOllamaModels({ baseUrl: normalizedBaseUrl });
+          assignProviderConnection(next, selectedProviderId, {
+            baseUrl: normalizedBaseUrl,
+          });
+          modelIds = discovered;
+          if (discovered.length === 0) {
+            prompter.note(
+              [
+                "No Ollama models found at this endpoint.",
+                "Continuing without model selection.",
+                "After Telegram starts, run:",
+                "- /ollama pull gpt-oss:20b",
+                "- /models",
+                "- /model <id|number>",
+              ].join("\n"),
+              "Ollama models",
+            );
+          }
+          break;
+        } catch (error) {
+          const errorMessage = trim(error?.message) || String(error);
+          const retry = await prompter.confirm({
+            message: `Failed to connect Ollama (${errorMessage}). Retry endpoint input?`,
+            initialValue: true,
+          });
+          if (!retry) {
+            throw new Error(`Ollama setup aborted: ${errorMessage}`);
+          }
+          suggestedBaseUrl = normalizedBaseUrl;
+        }
+      }
+      assignProviderOAuth(next, selectedProviderId, null);
     }
 
     const currentSelection = resolveConfiguredModelSelection(next);
     const currentModelId =
       currentSelection.providerId === selectedProviderId ? currentSelection.modelId : "";
-    const modelOptions = resolveProviderModelIds(selectedProviderId).map((id) => ({
-      value: id,
-      label: resolveModelRef(selectedProviderId, id),
-      hint: id === currentModelId ? "current" : undefined,
-    }));
+    if (!Array.isArray(modelIds) || modelIds.length === 0) {
+      if (selectedProviderId === OLLAMA_PROVIDER_ID) {
+        const codex = next.codex && typeof next.codex === "object" ? { ...next.codex } : {};
+        codex.provider = OLLAMA_PROVIDER_ID;
+        delete codex.model;
+        next.codex = codex;
+      } else {
+        throw new Error(`No models are available for provider ${selectedProviderLabel}.`);
+      }
+    } else {
+      const modelOptions = modelIds.map((id) => ({
+        value: id,
+        label: resolveModelRef(selectedProviderId, id),
+        hint: id === currentModelId ? "current" : undefined,
+      }));
 
-    const selectedModelId = await prompter.select({
-      message: `Select ${selectedProviderShortLabel} model`,
-      options: modelOptions,
-    });
+      const selectedModelId = await prompter.select({
+        message: `Select ${selectedProviderShortLabel} model`,
+        options: modelOptions,
+      });
 
-    if (!assignModelSelection(next, selectedProviderId, selectedModelId)) {
-      throw new Error(`Invalid model selection for provider ${selectedProviderId}: ${selectedModelId}`);
+      if (!assignModelSelection(next, selectedProviderId, selectedModelId)) {
+        throw new Error(`Invalid model selection for provider ${selectedProviderId}: ${selectedModelId}`);
+      }
     }
 
     const existingToken = trim(next.telegram?.botToken);
@@ -467,12 +553,17 @@ export async function runOnboard(options = {}) {
     const schedulerEnabled = resolveSchedulerSkillEnabled(saved.config);
     const savedSelection = resolveConfiguredModelSelection(saved.config);
     const savedProviderLabel = resolveProviderLabel(savedSelection.providerId);
+    const savedOllamaBaseUrl =
+      savedSelection.providerId === OLLAMA_PROVIDER_ID
+        ? resolveConfiguredOllamaBaseUrl(saved.config)
+        : "";
 
     prompter.outro(
       [
         `Saved config: ${saved.path}`,
         `Provider: ${savedProviderLabel} (${savedSelection.providerId})`,
         `Model: ${savedSelection.ref || "(not set)"}`,
+        savedOllamaBaseUrl ? `Ollama endpoint: ${savedOllamaBaseUrl}` : null,
         "Telegram DM policy: pairing (default)",
         `Notion skill: ${notionEnabled ? "enabled" : "disabled"}`,
         notionEnabled
@@ -499,7 +590,9 @@ export async function runOnboard(options = {}) {
         "Use /new to reset context, /context to inspect history size.",
         "Bot sends proactive status updates by default (set telegram.proactiveStatus=false to disable).",
         "Run: npm run telegram",
-      ].join("\n"),
+      ]
+        .filter(Boolean)
+        .join("\n"),
     );
   });
 }

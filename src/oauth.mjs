@@ -4,7 +4,7 @@ import {
   getOAuthProviders,
   loginOpenAICodex,
 } from "@mariozechner/pi-ai";
-import { CODEX_PROVIDER_ID, QWEN_PROVIDER_ID } from "./constants.mjs";
+import { CODEX_PROVIDER_ID, OLLAMA_PROVIDER_ID, QWEN_PROVIDER_ID } from "./constants.mjs";
 
 const QWEN_OAUTH_BASE_URL = "https://chat.qwen.ai";
 const QWEN_OAUTH_DEVICE_CODE_ENDPOINT = `${QWEN_OAUTH_BASE_URL}/api/v1/oauth2/device/code`;
@@ -392,6 +392,9 @@ export async function loginQwenOAuth(params) {
 
 export async function loginProviderOAuth(params) {
   const providerId = trim(params?.providerId) || CODEX_PROVIDER_ID;
+  if (providerId === OLLAMA_PROVIDER_ID) {
+    return null;
+  }
   if (providerId === QWEN_PROVIDER_ID) {
     return await loginQwenOAuth(params);
   }
@@ -487,6 +490,14 @@ export async function resolveFreshQwenAccessToken(oauthCredentials) {
 
 export async function resolveFreshProviderAccessToken(providerId, oauthCredentials) {
   const resolvedProviderId = trim(providerId) || CODEX_PROVIDER_ID;
+  if (resolvedProviderId === OLLAMA_PROVIDER_ID) {
+    return {
+      accessToken: "ollama-local",
+      credentials:
+        oauthCredentials && typeof oauthCredentials === "object" ? { ...oauthCredentials } : null,
+      changed: false,
+    };
+  }
   if (resolvedProviderId === QWEN_PROVIDER_ID) {
     return await resolveFreshQwenAccessToken(oauthCredentials);
   }

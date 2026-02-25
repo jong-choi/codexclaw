@@ -2,6 +2,7 @@ import {
   CODEX_MODEL_IDS,
   CODEX_PROVIDER_ID,
   LEGACY_CODEX_MODEL_ID_ALIASES,
+  OLLAMA_PROVIDER_ID,
   QWEN_MODEL_IDS,
   QWEN_PROVIDER_ID,
 } from "./constants.mjs";
@@ -18,6 +19,8 @@ const PROVIDER_SPECS = {
     modelIds: CODEX_MODEL_IDS,
     modelAliases: LEGACY_CODEX_MODEL_ID_ALIASES,
     supportsUsageSnapshot: true,
+    authMode: "oauth",
+    supportsNestedModelIds: false,
   },
   [QWEN_PROVIDER_ID]: {
     id: QWEN_PROVIDER_ID,
@@ -26,6 +29,18 @@ const PROVIDER_SPECS = {
     modelIds: QWEN_MODEL_IDS,
     modelAliases: {},
     supportsUsageSnapshot: false,
+    authMode: "oauth",
+    supportsNestedModelIds: false,
+  },
+  [OLLAMA_PROVIDER_ID]: {
+    id: OLLAMA_PROVIDER_ID,
+    label: "Ollama",
+    shortLabel: "Ollama",
+    modelIds: [],
+    modelAliases: {},
+    supportsUsageSnapshot: false,
+    authMode: "none",
+    supportsNestedModelIds: true,
   },
 };
 
@@ -70,8 +85,13 @@ export function providerSupportsUsageSnapshot(providerId) {
   return Boolean(resolveProviderSpec(providerId).supportsUsageSnapshot);
 }
 
+export function providerRequiresOAuth(providerId) {
+  return resolveProviderSpec(providerId).authMode !== "none";
+}
+
 export function normalizeProviderModelId(providerId, modelId) {
   const resolvedProviderId = resolveProviderId(providerId);
+  const spec = resolveProviderSpec(resolvedProviderId);
   const raw = trim(modelId);
   if (!raw) {
     return "";
@@ -87,12 +107,12 @@ export function normalizeProviderModelId(providerId, modelId) {
         return "";
       }
       candidate = maybeModel;
-    } else {
+    } else if (!spec.supportsNestedModelIds) {
       candidate = trim(candidate.slice(candidate.lastIndexOf("/") + 1));
     }
   }
 
-  const aliases = resolveProviderSpec(resolvedProviderId).modelAliases;
+  const aliases = spec.modelAliases;
   return aliases[candidate] ?? candidate;
 }
 
@@ -160,6 +180,51 @@ function cloneOauth(oauth) {
     return null;
   }
   return { ...oauth };
+}
+
+function cloneConnection(connection) {
+  if (!connection || typeof connection !== "object") {
+    return null;
+  }
+  return { ...connection };
+}
+
+export function resolveProviderConnection(config, providerId) {
+  const resolvedProviderId = resolveProviderId(providerId, "");
+  if (!resolvedProviderId) {
+    return null;
+  }
+  const providers = config?.codex?.providers;
+  if (!providers || typeof providers !== "object") {
+    return null;
+  }
+  return cloneConnection(providers[resolvedProviderId]);
+}
+
+export function assignProviderConnection(config, providerId, connection) {
+  if (!config || typeof config !== "object") {
+    return;
+  }
+
+  const resolvedProviderId = resolveProviderId(providerId);
+  const nextConnection = cloneConnection(connection);
+  const codex = config.codex && typeof config.codex === "object" ? { ...config.codex } : {};
+  const providers =
+    codex.providers && typeof codex.providers === "object" ? { ...codex.providers } : {};
+
+  if (nextConnection && Object.keys(nextConnection).length > 0) {
+    providers[resolvedProviderId] = nextConnection;
+  } else {
+    delete providers[resolvedProviderId];
+  }
+
+  if (Object.keys(providers).length > 0) {
+    codex.providers = providers;
+  } else {
+    delete codex.providers;
+  }
+
+  config.codex = codex;
 }
 
 export function resolveProviderOAuth(config, providerId) {

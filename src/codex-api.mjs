@@ -10,6 +10,8 @@ import {
   NOTION_API_ENV_NAME,
   NOTION_API_VERSION,
   NOTION_SKILL_KEY,
+  OLLAMA_API_BASE_URL,
+  OLLAMA_PROVIDER_ID,
   QWEN_API_BASE_URL,
   QWEN_PROVIDER_ID,
   SCHEDULER_SKILL_KEY,
@@ -21,6 +23,7 @@ import {
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
 import { normalizeProviderModelId, resolveProviderId } from "./model-provider.mjs";
+import { normalizeOllamaBaseUrl } from "./ollama.mjs";
 import {
   cancelScheduledJob,
   createScheduledJob,
@@ -483,8 +486,42 @@ function resolveQwenInputTypes(modelId) {
   return modelId === "vision-model" ? ["text", "image"] : ["text"];
 }
 
-function buildFallbackModel(providerId, modelId) {
+function resolveOllamaBaseUrl(providerConnection) {
+  const configuredBaseUrl = trim(providerConnection?.baseUrl) || OLLAMA_API_BASE_URL;
+  return normalizeOllamaBaseUrl(configuredBaseUrl, OLLAMA_API_BASE_URL);
+}
+
+function resolveOllamaOpenAIBaseUrl(providerConnection) {
+  const base = resolveOllamaBaseUrl(providerConnection);
+  return `${base}/v1`;
+}
+
+function buildFallbackModel(providerId, modelId, options = {}) {
   const resolvedProviderId = resolveProviderId(providerId);
+  if (resolvedProviderId === OLLAMA_PROVIDER_ID) {
+    return {
+      id: modelId,
+      name: modelId,
+      // pi-ai does not include a built-in "ollama" API provider.
+      // Use Ollama's OpenAI-compatible endpoint instead.
+      api: "openai-completions",
+      provider: OLLAMA_PROVIDER_ID,
+      baseUrl: resolveOllamaOpenAIBaseUrl(options?.providerConnection),
+      reasoning: false,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        supportsUsageInStreaming: false,
+        maxTokensField: "max_tokens",
+        supportsStrictMode: false,
+      },
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 32_768,
+      maxTokens: DEFAULT_MAX_TOKENS,
+    };
+  }
   if (resolvedProviderId === QWEN_PROVIDER_ID) {
     return {
       id: modelId,
@@ -520,14 +557,14 @@ function buildFallbackModel(providerId, modelId) {
   };
 }
 
-function resolveModel(providerId, modelId) {
+function resolveModel(providerId, modelId, options = {}) {
   const resolvedProviderId = resolveProviderId(providerId);
   const normalizedId = normalizeProviderModelId(resolvedProviderId, modelId);
   const registered = getModel(resolvedProviderId, normalizedId);
   if (registered) {
     return registered;
   }
-  return buildFallbackModel(resolvedProviderId, normalizedId);
+  return buildFallbackModel(resolvedProviderId, normalizedId, options);
 }
 
 function collectTextFromAssistantMessage(message) {
@@ -2261,10 +2298,12 @@ export async function requestCodexResponse(params) {
   if (!modelId) {
     throw new Error("Missing model id.");
   }
-  const model = resolveModel(providerId, modelId);
+  const model = resolveModel(providerId, modelId, {
+    providerConnection: params?.providerConnection,
+  });
   const history = normalizeConversationMessages(params?.messages, model);
 
-  if (!accessToken) {
+  if (providerId !== OLLAMA_PROVIDER_ID && !accessToken) {
     throw new Error("Missing access token.");
   }
   if (!message && history.length === 0) {

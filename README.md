@@ -5,13 +5,13 @@
 
 
 Most of this code was written with GPT-5.3-Codex-xhigh, so you can keep editing and iterating with Codex too. 
-This project is focused on Codex/Qwen + Telegram integration. 
+This project is focused on Codex/Qwen/Ollama + Telegram integration. 
 This project was created by extracting only the parts I needed from the much larger OpenClaw project. 
 OpenClaw is released under the MIT License ([openclaw/openclaw](https://github.com/openclaw/openclaw)) and yes, this project is too. 
 
 Minimal onboarding + runtime for:
 
-1. Auth provider selection (OpenAI Codex or Qwen)
+1. Provider selection (OpenAI Codex, Qwen, or Ollama)
 2. Provider model selection
 3. Telegram bot bridge
 4. Optional Notion skill API key setup
@@ -56,21 +56,55 @@ npm install
 
 ## Docker
 
-Build image and start utility container (does not auto-run Telegram bot):
+Run CodexClaw stack from project root (this creates the `codexclaw_shared` network):
 
 ```bash
 docker compose up --build -d
 ```
 
-Run onboarding (interactive OAuth: manual callback for Codex, device-code for Qwen):
+Run Ollama stack from separate folder:
 
 ```bash
+cd deploy/ollama
+docker compose up -d
+```
+
+Then use this endpoint in onboarding or `/provider ollama` setup:
+
+- Same Docker network (`codexclaw_shared`): `http://ollama:11434`
+- Ollama on host machine: `http://127.0.0.1:11434` (or `http://host.docker.internal:11434` from container)
+- Ollama on another server: reachable `http(s)://<host>:<port>`
+
+Pull/list models inside the Ollama container:
+
+```bash
+cd deploy/ollama
+docker compose exec ollama ollama pull gpt-oss:20b
+docker compose exec ollama ollama list
+```
+
+Stop stacks:
+
+```bash
+# Mode A (run from repo root)
+docker compose down
+
+# Ollama stack (run from deploy/ollama)
+cd deploy/ollama
+docker compose down
+```
+
+Run onboarding (interactive provider setup: OAuth for Codex/Qwen, endpoint input for Ollama):
+
+```bash
+# run from repo root
 docker compose run --rm codexclaw onboard
 ```
 
 Run Telegram bot with Docker (interactive, recommended for pairing code input):
 
 ```bash
+# run from repo root
 docker compose run --rm codexclaw telegram run
 ```
 
@@ -136,9 +170,12 @@ Notes:
 npm run onboard
 ```
 
-OAuth flow depends on provider:
+Provider setup depends on provider:
 - OpenAI Codex: manual callback URL paste
 - Qwen: device-code login (open URL + approve + polling)
+- Ollama: enter base URL and select discovered model list (`http://ollama:11434` on same Docker network)
+  - If no models are pulled yet, onboarding can continue without model selection.
+  - Later in Telegram: `/ollama pull gpt-oss:20b` -> `/models` -> `/model <id|number>`
 
 This stores config in `~/.codexclaw/config.json` by default.
 Telegram access follows openclaw-style pairing by default (`dmPolicy: "pairing"`):
@@ -200,12 +237,14 @@ Runtime behavior:
 - `/context`: show the number of stored context messages.
 - `/usage`: show live usage limit windows (Codex provider only).
 - `/think`, `/thinking`, `/reasoning`: show or set reasoning effort (`none|minimal|low|medium|high|xhigh`).
-- `/provider`: show current provider/model and pending OAuth state.
-- `/provider <id|alias|number>`: switch provider; if OAuth is missing, start provider OAuth in chat.
-- `/provider cancel`: cancel pending provider OAuth.
+- `/provider`: show current provider/model and pending setup state.
+- `/provider <id|alias|number>`: switch provider; starts OAuth flow (Codex/Qwen) or endpoint setup prompt (Ollama).
+- `/provider cancel`: cancel pending provider setup.
 - `/models`: list available models for the current provider.
 - `/model`: show current provider/model + current reasoning effort + usage summary. `/model <id|number>` switches model immediately.
+- `/ollama list|pull|rm`: list/pull/delete Ollama models in chat.
 - While Codex OAuth is pending, the next non-command message is treated as callback URL input.
+- While Ollama setup is pending, the next non-command message is treated as Ollama base URL input.
 - Invalid command or wrong arguments: bot replies with the correct usage and points to `/help`.
 - Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
 - Telegram command menu (`/`) is synced automatically on startup.

@@ -3,13 +3,13 @@
 [English](../README.md) | [한국어](README.ko.md) | [日本語](README.ja.md)
 
 이 코드의 대부분은 GPT-5.3-Codex-xhigh로 작성되었고, 그래서 Codex와 함께 계속 수정하고 발전시킬 수 있습니다.  
-이 프로젝트는 Codex/Qwen + Telegram 연동에 집중합니다.  
+이 프로젝트는 Codex/Qwen/Ollama + Telegram 연동에 집중합니다.  
 이 프로젝트는 훨씬 큰 OpenClaw 프로젝트에서 제가 필요한 부분만 추출해서 만들었습니다.  
 OpenClaw는 MIT 라이선스([openclaw/openclaw](https://github.com/openclaw/openclaw))로 배포되며, 이 프로젝트도 동일합니다.
 
 최소한의 온보딩 + 런타임 구성:
 
-1. 인증 provider 선택(OpenAI Codex 또는 Qwen)
+1. provider 선택(OpenAI Codex, Qwen, Ollama)
 2. provider별 모델 선택
 3. Telegram 봇 브리지
 4. 선택: Notion 스킬 API 키 설정
@@ -54,21 +54,55 @@ npm install
 
 ## Docker
 
-이미지를 빌드하고 유틸리티 컨테이너를 시작합니다(Telegram 봇 자동 실행 안 함):
+프로젝트 루트에서 CodexClaw 스택 실행(`codexclaw_shared` 네트워크 자동 생성):
 
 ```bash
 docker compose up --build -d
 ```
 
-온보딩 실행(대화형 OAuth: Codex는 콜백 URL 수동 입력, Qwen은 device-code):
+별도 폴더에서 Ollama 스택 실행:
 
 ```bash
+cd deploy/ollama
+docker compose up -d
+```
+
+온보딩 또는 `/provider ollama`에서 주소 입력 시 기준:
+
+- 같은 Docker 네트워크(`codexclaw_shared`): `http://ollama:11434`
+- Ollama가 호스트 머신에서 실행 중: `http://127.0.0.1:11434` (컨테이너에서는 `http://host.docker.internal:11434` 가능)
+- 다른 서버에서 실행 중: 컨테이너에서 접근 가능한 `http(s)://<host>:<port>`
+
+Ollama 컨테이너에서 모델 pull/list:
+
+```bash
+cd deploy/ollama
+docker compose exec ollama ollama pull gpt-oss:20b
+docker compose exec ollama ollama list
+```
+
+스택 종료:
+
+```bash
+# 모드 A (레포 루트에서 실행)
+docker compose down
+
+# Ollama 스택 (deploy/ollama에서 실행)
+cd deploy/ollama
+docker compose down
+```
+
+온보딩 실행(대화형 provider 설정: Codex/Qwen은 OAuth, Ollama는 endpoint 입력):
+
+```bash
+# 레포 루트에서 실행
 docker compose run --rm codexclaw onboard
 ```
 
 Docker로 Telegram 봇 실행(대화형, 페어링 코드 입력용 권장):
 
 ```bash
+# 레포 루트에서 실행
 docker compose run --rm codexclaw telegram run
 ```
 
@@ -134,9 +168,12 @@ docker compose run --rm codexclaw config show
 npm run onboard
 ```
 
-OAuth 방식은 provider에 따라 다릅니다:
+Provider 설정 방식은 provider에 따라 다릅니다:
 - OpenAI Codex: 콜백 URL 수동 붙여넣기
 - Qwen: device-code 로그인(URL 열기 + 승인 + 자동 폴링)
+- Ollama: base URL 입력 후 감지된 모델 목록에서 선택 (`같은 Docker 네트워크면 http://ollama:11434`)
+  - 아직 pull한 모델이 없어도 온보딩은 계속 진행할 수 있습니다.
+  - 이후 Telegram에서 `/ollama pull gpt-oss:20b` -> `/models` -> `/model <id|번호>` 순서로 설정하세요.
 
 기본적으로 설정은 `~/.codexclaw/config.json`에 저장됩니다.  
 Telegram 접근은 기본적으로 openclaw 스타일 페어링(`dmPolicy: "pairing"`)을 따릅니다:
@@ -198,12 +235,14 @@ npm run telegram
 - `/context`: 저장된 컨텍스트 메시지 수 확인
 - `/usage`: 실시간 한도 윈도우 확인(Codex provider에서만 지원)
 - `/think`, `/thinking`, `/reasoning`: 리즈닝 에포트 조회/변경(`none|minimal|low|medium|high|xhigh`)
-- `/provider`: 현재 provider/모델과 진행 중인 OAuth 상태 확인
-- `/provider <id|alias|번호>`: provider 전환(해당 provider OAuth가 없으면 채팅 내 OAuth 시작)
-- `/provider cancel`: 진행 중인 provider OAuth 취소
+- `/provider`: 현재 provider/모델과 진행 중인 provider 설정 상태 확인
+- `/provider <id|alias|번호>`: provider 전환(Codex/Qwen은 OAuth, Ollama는 endpoint 입력 안내 시작)
+- `/provider cancel`: 진행 중인 provider 설정 취소
 - `/models`: 현재 provider에서 사용 가능한 모델 목록 확인
 - `/model`: 현재 provider/모델 + 리즈닝 에포트 + 한도 요약 확인, `/model <id|번호>`로 즉시 모델 변경
+- `/ollama list|pull|rm`: Ollama 모델 목록/추가/삭제
 - Codex OAuth 진행 중에는 다음 일반 메시지를 콜백 URL 입력으로 처리
+- Ollama 설정 진행 중에는 다음 일반 메시지를 Ollama base URL 입력으로 처리
 - 잘못된 커맨드/인자 입력 시: 올바른 사용법과 `/help` 안내를 반환
 - 터미널 입력 `bye` 또는 `exit`: `telegram run` 즉시 종료(`\`/bye\``, `\`/exit\``도 동작)
 - Telegram 명령어 메뉴(`/`)는 시작 시 자동 동기화됩니다.
