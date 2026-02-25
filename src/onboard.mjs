@@ -5,6 +5,8 @@ import {
   NOTION_SKILL_KEY,
   OLLAMA_API_BASE_URL,
   OLLAMA_PROVIDER_ID,
+  OPENROUTER_API_BASE_URL,
+  OPENROUTER_PROVIDER_ID,
   QWEN_PROVIDER_ID,
   SCHEDULER_SKILL_KEY,
   WORKSPACE_TEMPLATE_ROOT_DIR,
@@ -34,6 +36,13 @@ import {
   normalizeOllamaBaseUrl,
   validateOllamaBaseUrl,
 } from "./ollama.mjs";
+import {
+  buildOpenRouterSetupHintLines,
+  listOpenRouterFreeModels,
+  normalizeOpenRouterBaseUrl,
+  validateOpenRouterApiKey,
+  validateOpenRouterBaseUrl,
+} from "./openrouter.mjs";
 import { withPrompter } from "./prompt.mjs";
 import {
   ensureWorkspaceInitialized,
@@ -136,6 +145,23 @@ function resolveConfiguredOllamaBaseUrl(config) {
   }
 }
 
+function resolveConfiguredOpenRouterConnection(config) {
+  const connection = resolveProviderConnection(config, OPENROUTER_PROVIDER_ID);
+  const apiKey = trim(connection?.apiKey);
+  const rawBaseUrl = trim(connection?.baseUrl);
+  try {
+    return {
+      apiKey,
+      baseUrl: normalizeOpenRouterBaseUrl(rawBaseUrl || OPENROUTER_API_BASE_URL, OPENROUTER_API_BASE_URL),
+    };
+  } catch {
+    return {
+      apiKey,
+      baseUrl: normalizeOpenRouterBaseUrl(OPENROUTER_API_BASE_URL, OPENROUTER_API_BASE_URL),
+    };
+  }
+}
+
 export async function runOnboard(options = {}) {
   const loaded = await loadConfig(options.configPath);
   const existingRaw = loaded.config ?? {};
@@ -168,9 +194,9 @@ export async function runOnboard(options = {}) {
     prompter.note(
       [
         "This setup includes only 7 steps:",
-        "1) Choose provider (OpenAI Codex, Qwen, or Ollama)",
-        "2) Provider auth/setup (OAuth or Ollama endpoint)",
-        "3) Choose one model (or defer for Ollama when no model is pulled yet)",
+        "1) Choose provider (OpenAI Codex, Qwen, Ollama, or OpenRouter)",
+        "2) Provider auth/setup (OAuth, Ollama endpoint, or OpenRouter API key)",
+        "3) Choose one model (or defer when no model is available yet)",
         "4) Configure Telegram bot",
         "5) Optional: configure Notion skill API key",
         "6) Optional: configure web_search/web_fetch skills",
@@ -189,6 +215,8 @@ export async function runOnboard(options = {}) {
           ? "device-code login"
           : provider.id === OLLAMA_PROVIDER_ID
             ? "local/remote endpoint"
+            : provider.id === OPENROUTER_PROVIDER_ID
+              ? "api key + free models"
             : "ChatGPT OAuth login",
     }));
 
@@ -275,15 +303,77 @@ export async function runOnboard(options = {}) {
         }
       }
       assignProviderOAuth(next, selectedProviderId, null);
+    } else if (selectedProviderId === OPENROUTER_PROVIDER_ID) {
+      const existingOpenRouter = resolveConfiguredOpenRouterConnection(next);
+      let suggestedApiKey = existingOpenRouter.apiKey;
+      let suggestedBaseUrl = existingOpenRouter.baseUrl;
+
+      while (true) {
+        prompter.note(
+          buildOpenRouterSetupHintLines().join("\n"),
+          "OpenRouter setup",
+        );
+        const apiKey = await prompter.text({
+          message: "OpenRouter API key",
+          required: true,
+          initialValue: suggestedApiKey,
+          validate: validateOpenRouterApiKey,
+        });
+        const rawBaseUrl = await prompter.text({
+          message: "OpenRouter base URL",
+          required: true,
+          initialValue: suggestedBaseUrl,
+          validate: validateOpenRouterBaseUrl,
+        });
+        const normalizedBaseUrl = normalizeOpenRouterBaseUrl(rawBaseUrl, OPENROUTER_API_BASE_URL);
+
+        try {
+          const discovered = await listOpenRouterFreeModels({
+            apiKey,
+            baseUrl: normalizedBaseUrl,
+          });
+          assignProviderConnection(next, selectedProviderId, {
+            apiKey: trim(apiKey),
+            baseUrl: normalizedBaseUrl,
+          });
+          modelIds = discovered;
+          if (discovered.length === 0) {
+            prompter.note(
+              [
+                "No free OpenRouter models were found at this endpoint.",
+                "Continuing without model selection.",
+                "After Telegram starts, run:",
+                "- /provider openrouter",
+                "- /models",
+                "- /model <id|number>",
+              ].join("\n"),
+              "OpenRouter models",
+            );
+          }
+          break;
+        } catch (error) {
+          const errorMessage = trim(error?.message) || String(error);
+          const retry = await prompter.confirm({
+            message: `Failed to scan OpenRouter free models (${errorMessage}). Retry setup input?`,
+            initialValue: true,
+          });
+          if (!retry) {
+            throw new Error(`OpenRouter setup aborted: ${errorMessage}`);
+          }
+          suggestedApiKey = trim(apiKey);
+          suggestedBaseUrl = normalizedBaseUrl;
+        }
+      }
+      assignProviderOAuth(next, selectedProviderId, null);
     }
 
     const currentSelection = resolveConfiguredModelSelection(next);
     const currentModelId =
       currentSelection.providerId === selectedProviderId ? currentSelection.modelId : "";
     if (!Array.isArray(modelIds) || modelIds.length === 0) {
-      if (selectedProviderId === OLLAMA_PROVIDER_ID) {
+      if (selectedProviderId === OLLAMA_PROVIDER_ID || selectedProviderId === OPENROUTER_PROVIDER_ID) {
         const codex = next.codex && typeof next.codex === "object" ? { ...next.codex } : {};
-        codex.provider = OLLAMA_PROVIDER_ID;
+        codex.provider = selectedProviderId;
         delete codex.model;
         next.codex = codex;
       } else {

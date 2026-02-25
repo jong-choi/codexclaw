@@ -11,6 +11,7 @@ import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
   CODEX_PROVIDER_ID,
   OLLAMA_PROVIDER_ID,
+  OPENROUTER_PROVIDER_ID,
   QWEN_PROVIDER_ID,
   TELEGRAM_API_BASE_URL,
 } from "./constants.mjs";
@@ -38,6 +39,12 @@ import {
   pullOllamaModel,
   resolveOllamaBaseUrlFromConfig,
 } from "./ollama.mjs";
+import {
+  buildOpenRouterSetupHintLines,
+  listOpenRouterFreeModels,
+  normalizeOpenRouterBaseUrl,
+  validateOpenRouterApiKey,
+} from "./openrouter.mjs";
 import {
   beginQwenDeviceOAuth,
   createCodexCallbackOAuthSession,
@@ -88,6 +95,7 @@ const PROACTIVE_STATUS_QUIET_AFTER_TOOL_MS = 8_000;
 const CODEX_USAGE_API_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_USAGE_TIMEOUT_MS = 6_000;
 const REASONING_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const MAX_MODEL_LIST_ITEMS = 80;
 
 const TELEGRAM_BOT_COMMANDS = [
   { command: "start", description: "Show quick help" },
@@ -112,6 +120,8 @@ const PROVIDER_ALIAS_TO_ID = new Map([
   ["qwen-portal", QWEN_PROVIDER_ID],
   ["qwen_portal", QWEN_PROVIDER_ID],
   ["ollama", OLLAMA_PROVIDER_ID],
+  ["openrouter", OPENROUTER_PROVIDER_ID],
+  ["open-router", OPENROUTER_PROVIDER_ID],
 ]);
 
 function isInlineExitCommand(value) {
@@ -622,7 +632,9 @@ function buildModelStatusMessage(config, providerId, modelId, usageLines) {
 
 async function resolveFreshProviderSessionAccess(params) {
   const providerId = trim(params?.providerId) || resolveConfiguredProviderId(params?.config);
-  const fresh = await resolveFreshProviderAccessToken(providerId, params?.oauth);
+  const fresh = await resolveFreshProviderAccessToken(providerId, params?.oauth, {
+    providerConnection: resolveProviderConnection(params?.config, providerId),
+  });
   const oauth = fresh.credentials;
   if (fresh.changed) {
     assignProviderOAuth(params.config, providerId, oauth);
@@ -645,10 +657,15 @@ function buildModelListMessage(params) {
   const providerShortLabel = resolveProviderShortLabel(providerId);
   const normalizedCurrent = normalizeProviderModelId(providerId, currentModelId);
   const lines = [`Available ${providerShortLabel} models:`];
-  for (let i = 0; i < modelIds.length; i += 1) {
-    const modelId = modelIds[i];
+  const displayedModelIds = modelIds.slice(0, MAX_MODEL_LIST_ITEMS);
+  for (let i = 0; i < displayedModelIds.length; i += 1) {
+    const modelId = displayedModelIds[i];
     const current = modelId === normalizedCurrent ? " (current)" : "";
     lines.push(`${i + 1}. ${resolveModelRef(providerId, modelId)}${current}`);
+  }
+  if (modelIds.length > displayedModelIds.length) {
+    lines.push(`...and ${modelIds.length - displayedModelIds.length} more.`);
+    lines.push("Tip: use /model <full_id> to select models not shown by number.");
   }
   lines.push("");
   lines.push("Use /model <id|number> to switch.");
@@ -662,6 +679,12 @@ async function resolveProviderModelIdsRuntime(providerId, config) {
   if (resolvedProviderId === OLLAMA_PROVIDER_ID) {
     const baseUrl = resolveOllamaBaseUrlFromConfig(config);
     return await listOllamaModels({ baseUrl });
+  }
+  if (resolvedProviderId === OPENROUTER_PROVIDER_ID) {
+    const connection = resolveProviderConnection(config, OPENROUTER_PROVIDER_ID);
+    const baseUrl = normalizeOpenRouterBaseUrl(connection?.baseUrl);
+    const apiKey = trim(connection?.apiKey);
+    return await listOpenRouterFreeModels({ baseUrl, apiKey });
   }
   return resolveProviderModelIds(resolvedProviderId);
 }
@@ -688,7 +711,7 @@ function resolveModelSelection(params) {
     const maybeProvider = trim(candidate.slice(0, slash));
     if (maybeProvider === providerId) {
       candidate = trim(candidate.slice(slash + 1));
-    } else if (providerId !== OLLAMA_PROVIDER_ID) {
+    } else if (providerId !== OLLAMA_PROVIDER_ID && providerId !== OPENROUTER_PROVIDER_ID) {
       candidate = candidate.slice(candidate.lastIndexOf("/") + 1);
     }
   }
@@ -774,11 +797,32 @@ function resolveOllamaStatusSuffix(config) {
   return "endpoint required";
 }
 
+function resolveOpenRouterStatusSuffix(config) {
+  const connection = resolveProviderConnection(config, OPENROUTER_PROVIDER_ID);
+  const apiKey = trim(connection?.apiKey);
+  const baseUrl = trim(connection?.baseUrl);
+  if (!apiKey) {
+    return "api key required";
+  }
+  if (baseUrl) {
+    return `api key ready (${baseUrl})`;
+  }
+  return "api key ready";
+}
+
 function buildOllamaEndpointPrompt() {
   return [
     "Enter Ollama base URL as your next non-command message.",
     ...buildOllamaEndpointHintLines(),
     "Examples: http://ollama:11434, http://127.0.0.1:11434",
+    "Use /provider cancel to abort.",
+  ].join("\n");
+}
+
+function buildOpenRouterApiKeyPrompt() {
+  return [
+    "Send OpenRouter API key as your next non-command message.",
+    ...buildOpenRouterSetupHintLines(),
     "Use /provider cancel to abort.",
   ].join("\n");
 }
@@ -1028,6 +1072,9 @@ function buildProviderPendingMessage(pending) {
   if (pending.kind === "ollama-base-url") {
     return "Send Ollama base URL as your next non-command message, or run /provider cancel.";
   }
+  if (pending.kind === "openrouter-api-key") {
+    return "Send OpenRouter API key as your next non-command message, or run /provider cancel.";
+  }
   return "Complete browser approval, or run /provider cancel.";
 }
 
@@ -1070,7 +1117,11 @@ function buildProviderCommandMessage(params) {
       ? Boolean(resolveProviderOAuth(params?.config, provider.id)?.access)
         ? "oauth ready"
         : "oauth required"
-      : resolveOllamaStatusSuffix(params?.config);
+      : provider.id === OLLAMA_PROVIDER_ID
+        ? resolveOllamaStatusSuffix(params?.config)
+        : provider.id === OPENROUTER_PROVIDER_ID
+          ? resolveOpenRouterStatusSuffix(params?.config)
+          : "ready";
     lines.push(`${i + 1}. ${provider.shortLabel} (${provider.id})${current} - ${status}`);
   }
   lines.push("");
@@ -1078,21 +1129,33 @@ function buildProviderCommandMessage(params) {
   lines.push("/provider");
   lines.push("/provider <id|alias|number>");
   lines.push("/provider cancel");
-  lines.push("Aliases: codex, openai, qwen, ollama");
+  lines.push("Aliases: codex, openai, qwen, ollama, openrouter");
   return lines.join("\n");
 }
 
 function buildProviderUpdatedMessage(config, providerId, modelId, unchanged = false) {
-  const connection = providerId === OLLAMA_PROVIDER_ID ? resolveProviderConnection(config, providerId) : null;
+  const connection =
+    providerId === OLLAMA_PROVIDER_ID || providerId === OPENROUTER_PROVIDER_ID
+      ? resolveProviderConnection(config, providerId)
+      : null;
   const endpointLine =
     providerId === OLLAMA_PROVIDER_ID && trim(connection?.baseUrl)
       ? `Ollama endpoint: ${trim(connection.baseUrl)}`
+      : providerId === OPENROUTER_PROVIDER_ID && trim(connection?.baseUrl)
+        ? `OpenRouter endpoint: ${trim(connection.baseUrl)}`
+      : null;
+  const apiKeyLine =
+    providerId === OPENROUTER_PROVIDER_ID
+      ? trim(connection?.apiKey)
+        ? "OpenRouter API key: configured"
+        : "OpenRouter API key: missing"
       : null;
   return [
     unchanged ? "Provider unchanged." : "Provider updated.",
     `Current provider: ${resolveProviderShortLabel(providerId)} (${providerId})`,
     `Current model: ${formatCurrentModelRef(providerId, modelId)}`,
     endpointLine,
+    apiKeyLine,
     `Reasoning effort: ${resolveReasoningEffort(config)}`,
     "Use /models and /model <id|number> to manage model selection.",
   ]
@@ -1137,7 +1200,12 @@ function buildHelpMessage(providerId) {
   const providerShortLabel = resolveProviderShortLabel(providerId);
   const providerModelIds = resolveProviderModelIds(providerId);
   const exampleModel =
-    providerModelIds[0] || (providerId === OLLAMA_PROVIDER_ID ? "gpt-oss:20b" : "<id>");
+    providerModelIds[0]
+      || (providerId === OLLAMA_PROVIDER_ID
+        ? "gpt-oss:20b"
+        : providerId === OPENROUTER_PROVIDER_ID
+          ? "meta-llama/llama-3.3-70b-instruct:free"
+          : "<id>");
   return [
     "CodexClaw Telegram commands",
     "",
@@ -1147,7 +1215,7 @@ function buildHelpMessage(providerId) {
     "/usage - Show live usage limits (Codex only).",
     "/think <level> - Set reasoning effort.",
     "/provider - Show provider status and pending setup state.",
-    "/provider <id|alias|number> - Switch provider (OAuth or Ollama endpoint setup).",
+    "/provider <id|alias|number> - Switch provider (OAuth, Ollama endpoint, or OpenRouter API-key setup).",
     "/provider cancel - Cancel pending provider setup request.",
     "/models - List available models for current provider.",
     `/model - Show current provider/model (${providerShortLabel}) + reasoning + usage summary.`,
@@ -1160,6 +1228,7 @@ function buildHelpMessage(providerId) {
     "Examples:",
     "/provider qwen",
     "/provider ollama",
+    "/provider openrouter",
     "/provider 1",
     "/provider cancel",
     "/think medium",
@@ -1394,7 +1463,9 @@ async function runDueScheduledJobs(params) {
 
     try {
       await sendTyping(params?.botToken, chatId).catch(() => {});
-      const fresh = await resolveFreshProviderAccessToken(params?.providerId, oauth);
+      const fresh = await resolveFreshProviderAccessToken(params?.providerId, oauth, {
+        providerConnection: resolveProviderConnection(params?.config, params?.providerId),
+      });
       oauth = fresh.credentials;
 
       if (fresh.changed) {
@@ -1490,6 +1561,10 @@ export async function runTelegramBot(options = {}) {
     if (activeProviderId === OLLAMA_PROVIDER_ID) {
       process.stdout.write(
         "No Ollama model selected yet. Use /ollama pull gpt-oss:20b and /model <id|number> in Telegram.\n",
+      );
+    } else if (activeProviderId === OPENROUTER_PROVIDER_ID) {
+      process.stdout.write(
+        "No OpenRouter model selected yet. Use /provider openrouter, then /models and /model <id|number>.\n",
       );
     } else {
       throw new Error("model selection is missing. Run `codexclaw onboard`.");
@@ -1610,6 +1685,31 @@ export async function runTelegramBot(options = {}) {
         "Ollama provider setup started.",
         `Current endpoint: ${pending.suggestedBaseUrl}`,
         buildOllamaEndpointPrompt(),
+      ].join("\n"),
+    );
+  };
+
+  const startOpenRouterProviderSetup = async ({ providerId, chatId, senderId }) => {
+    const existingConnection = resolveProviderConnection(config, OPENROUTER_PROVIDER_ID);
+    const baseUrl = normalizeOpenRouterBaseUrl(existingConnection?.baseUrl);
+    const pending = {
+      kind: "openrouter-api-key",
+      providerId,
+      chatId,
+      senderId,
+      baseUrl,
+      canceled: false,
+    };
+    pendingProviderOAuth = pending;
+    process.stdout.write(`Started OpenRouter provider setup for chat ${chatId} (sender ${senderId}).\n`);
+
+    await sendMessage(
+      botToken,
+      chatId,
+      [
+        "OpenRouter provider setup started.",
+        `Base URL: ${baseUrl}`,
+        buildOpenRouterApiKeyPrompt(),
       ].join("\n"),
     );
   };
@@ -2032,6 +2132,79 @@ export async function runTelegramBot(options = {}) {
                 `Failed to activate Ollama provider: ${trim(error?.message) || "unknown error"}`,
               );
             }
+          } else if (senderPendingProviderOAuth.kind === "openrouter-api-key") {
+            const apiKeyError = validateOpenRouterApiKey(text);
+            if (apiKeyError) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Invalid OpenRouter API key: ${apiKeyError}\n${buildOpenRouterApiKeyPrompt()}`,
+              );
+              continue;
+            }
+
+            const apiKey = trim(text);
+            const baseUrl = normalizeOpenRouterBaseUrl(senderPendingProviderOAuth.baseUrl);
+            let discoveredModels;
+            try {
+              discoveredModels = await listOpenRouterFreeModels({
+                apiKey,
+                baseUrl,
+              });
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                [
+                  `Failed to scan OpenRouter free models: ${trim(error?.message) || "unknown error"}`,
+                  "Send API key again or run /provider cancel.",
+                ].join("\n"),
+              );
+              continue;
+            }
+
+            assignProviderConnection(config, OPENROUTER_PROVIDER_ID, {
+              apiKey,
+              baseUrl,
+            });
+
+            if (!Array.isArray(discoveredModels) || discoveredModels.length === 0) {
+              await sendMessage(
+                botToken,
+                chatId,
+                [
+                  `Connected to OpenRouter (${baseUrl}) but no free models were returned.`,
+                  "Try again later or switch provider.",
+                  "Use /provider cancel to abort.",
+                ].join("\n"),
+              );
+              continue;
+            }
+
+            try {
+              const switched = await applyProviderSwitch({
+                providerId: OPENROUTER_PROVIDER_ID,
+                oauthCredentials: null,
+                modelIds: discoveredModels,
+              });
+              clearPendingProviderOAuth(senderPendingProviderOAuth);
+              await sendMessage(
+                botToken,
+                chatId,
+                buildProviderUpdatedMessage(
+                  config,
+                  switched.providerId,
+                  switched.modelId,
+                  switched.unchanged,
+                ),
+              );
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Failed to activate OpenRouter provider: ${trim(error?.message) || "unknown error"}`,
+              );
+            }
           } else {
             await sendMessage(
               botToken,
@@ -2287,6 +2460,95 @@ export async function runTelegramBot(options = {}) {
             continue;
           }
 
+          if (selectedProviderId === OPENROUTER_PROVIDER_ID) {
+            const existingConnection = resolveProviderConnection(config, OPENROUTER_PROVIDER_ID);
+            const existingApiKey = trim(existingConnection?.apiKey);
+            if (!existingApiKey) {
+              try {
+                await startOpenRouterProviderSetup({
+                  providerId: selectedProviderId,
+                  chatId,
+                  senderId,
+                });
+              } catch (error) {
+                clearPendingProviderOAuth();
+                await sendMessage(
+                  botToken,
+                  chatId,
+                  `Failed to start OpenRouter setup: ${trim(error?.message) || "unknown error"}`,
+                );
+              }
+              continue;
+            }
+
+            let modelIds = [];
+            let scanError = "";
+            try {
+              modelIds = await listOpenRouterFreeModels({
+                apiKey: existingApiKey,
+                baseUrl: normalizeOpenRouterBaseUrl(existingConnection?.baseUrl),
+              });
+            } catch (error) {
+              scanError = trim(error?.message) || "unknown error";
+            }
+
+            if (!Array.isArray(modelIds) || modelIds.length === 0) {
+              try {
+                await startOpenRouterProviderSetup({
+                  providerId: selectedProviderId,
+                  chatId,
+                  senderId,
+                });
+                if (scanError) {
+                  await sendMessage(
+                    botToken,
+                    chatId,
+                    `OpenRouter free-model scan failed with saved key: ${scanError}\nSend a new API key to continue.`,
+                  );
+                } else {
+                  await sendMessage(
+                    botToken,
+                    chatId,
+                    "No free OpenRouter models found with the saved key. Send API key again to rescan.",
+                  );
+                }
+              } catch (error) {
+                clearPendingProviderOAuth();
+                await sendMessage(
+                  botToken,
+                  chatId,
+                  `Failed to restart OpenRouter setup: ${trim(error?.message) || "unknown error"}`,
+                );
+              }
+              continue;
+            }
+
+            try {
+              const switched = await applyProviderSwitch({
+                providerId: selectedProviderId,
+                oauthCredentials: null,
+                modelIds,
+              });
+              await sendMessage(
+                botToken,
+                chatId,
+                buildProviderUpdatedMessage(
+                  config,
+                  switched.providerId,
+                  switched.modelId,
+                  switched.unchanged,
+                ),
+              );
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `OpenRouter switch failed: ${trim(error?.message) || "unknown error"}`,
+              );
+            }
+            continue;
+          }
+
           const selectedRequiresOAuth = providerRequiresOAuth(selectedProviderId);
           const existingOAuth = resolveProviderOAuth(config, selectedProviderId);
           if (selectedRequiresOAuth && existingOAuth && trim(existingOAuth.access)) {
@@ -2509,6 +2771,11 @@ export async function runTelegramBot(options = {}) {
                   "No Ollama model is selected yet.",
                   "Run /ollama pull gpt-oss:20b, then /models and /model <id|number>.",
                 ].join("\n")
+              : activeProviderId === OPENROUTER_PROVIDER_ID
+                ? [
+                    "No OpenRouter model is selected yet.",
+                    "Run /provider openrouter, then /models and /model <id|number>.",
+                  ].join("\n")
               : [
                   `No model is selected for ${resolveProviderShortLabel(activeProviderId)}.`,
                   "Use /models and /model <id|number> first.",
@@ -2564,7 +2831,9 @@ export async function runTelegramBot(options = {}) {
         }
 
         try {
-          const fresh = await resolveFreshProviderAccessToken(activeProviderId, oauth);
+          const fresh = await resolveFreshProviderAccessToken(activeProviderId, oauth, {
+            providerConnection: resolveProviderConnection(config, activeProviderId),
+          });
           oauth = fresh.credentials;
 
           if (fresh.changed) {

@@ -3,13 +3,13 @@
 [English](../README.md) | [한국어](README.ko.md) | [日本語](README.ja.md)
 
 このコードの大部分は GPT-5.3-Codex-xhigh で書かれており、Codex と一緒に継続して編集・改善できます。  
-このプロジェクトは Codex/Qwen/Ollama + Telegram 連携にフォーカスしています。  
+このプロジェクトは Codex/Qwen/Ollama/OpenRouter + Telegram 連携にフォーカスしています。  
 このプロジェクトは、より大きな OpenClaw プロジェクトから必要な部分だけを抽出して作成しています。  
 OpenClaw は MIT ライセンス([openclaw/openclaw](https://github.com/openclaw/openclaw))で公開されており、このプロジェクトも同じです。
 
 最小構成のオンボーディング + ランタイム:
 
-1. provider 選択(OpenAI Codex、Qwen、Ollama)
+1. provider 選択(OpenAI Codex、Qwen、Ollama、OpenRouter)
 2. provider ごとのモデル選択
 3. Telegram ボットブリッジ
 4. 任意: Notion スキル API キー設定
@@ -92,7 +92,7 @@ cd deploy/ollama
 docker compose down
 ```
 
-オンボーディング実行(対話式 provider 設定: Codex/Qwen は OAuth、Ollama は endpoint 入力):
+オンボーディング実行(対話式 provider 設定: Codex/Qwen は OAuth、Ollama は endpoint 入力、OpenRouter は API キー + 無料モデルスキャン):
 
 ```bash
 # リポジトリルートで実行
@@ -174,6 +174,8 @@ Provider 設定は provider によって異なります:
 - Ollama: base URL を入力し、検出されたモデル一覧から選択(`同一 Docker ネットワークなら http://ollama:11434`)
   - まだ pull 済みモデルがなくても、オンボーディングは継続できます。
   - 後で Telegram で `/ollama pull gpt-oss:20b` -> `/models` -> `/model <id|番号>` を実行してください。
+- OpenRouter: API キー + base URL(既定値 `https://openrouter.ai/api/v1`)を入力し、無料モデルを動的にスキャン/選択
+  - 無料モデル判定(OpenClaw 準拠): モデル ID が `:free` で終わる、または prompt/completion 価格が 0。
 
 設定はデフォルトで `~/.codexclaw/config.json` に保存されます。  
 Telegram アクセスはデフォルトで openclaw スタイルのペアリング(`dmPolicy: "pairing"`)です:
@@ -236,13 +238,14 @@ npm run telegram
 - `/usage`: リアルタイム利用枠ウィンドウを表示(Codex provider のみ)
 - `/think`, `/thinking`, `/reasoning`: Reasoning effort を表示/変更(`none|minimal|low|medium|high|xhigh`)
 - `/provider`: 現在 provider/モデルと進行中 provider 設定状態を表示
-- `/provider <id|alias|番号>`: provider を切替(Codex/Qwen は OAuth、Ollama は endpoint 入力案内を開始)
+- `/provider <id|alias|番号>`: provider を切替(Codex/Qwen は OAuth、Ollama は endpoint 入力案内、OpenRouter は API キー入力 + 無料モデルスキャン)
 - `/provider cancel`: 進行中の provider 設定をキャンセル
 - `/models`: 現在 provider で利用可能なモデル一覧を表示
 - `/model`: 現在 provider/モデル + reasoning effort + 利用枠サマリーを表示し、`/model <id|番号>`で即時切替
 - `/ollama list|pull|rm`: Ollama モデルの一覧/追加/削除
 - Codex OAuth 進行中は、次の通常メッセージをコールバック URL 入力として扱います
 - Ollama 設定進行中は、次の通常メッセージを Ollama base URL 入力として扱います
+- OpenRouter 設定進行中は、次の通常メッセージを OpenRouter API キー入力として扱います
 - 不正なコマンド/引数: 正しい使い方と `/help` を案内
 - ターミナルで `bye` または `exit` 入力: `telegram run` を即停止(`\`/bye\``, `\`/exit\``も可)
 - Telegram コマンドメニュー(`/`)は起動時に自動同期されます。

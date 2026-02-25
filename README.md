@@ -5,13 +5,13 @@
 
 
 Most of this code was written with GPT-5.3-Codex-xhigh, so you can keep editing and iterating with Codex too. 
-This project is focused on Codex/Qwen/Ollama + Telegram integration. 
+This project is focused on Codex/Qwen/Ollama/OpenRouter + Telegram integration. 
 This project was created by extracting only the parts I needed from the much larger OpenClaw project. 
 OpenClaw is released under the MIT License ([openclaw/openclaw](https://github.com/openclaw/openclaw)) and yes, this project is too. 
 
 Minimal onboarding + runtime for:
 
-1. Provider selection (OpenAI Codex, Qwen, or Ollama)
+1. Provider selection (OpenAI Codex, Qwen, Ollama, or OpenRouter)
 2. Provider model selection
 3. Telegram bot bridge
 4. Optional Notion skill API key setup
@@ -94,7 +94,7 @@ cd deploy/ollama
 docker compose down
 ```
 
-Run onboarding (interactive provider setup: OAuth for Codex/Qwen, endpoint input for Ollama):
+Run onboarding (interactive provider setup: OAuth for Codex/Qwen, endpoint input for Ollama, API key + free-model scan for OpenRouter):
 
 ```bash
 # run from repo root
@@ -176,6 +176,8 @@ Provider setup depends on provider:
 - Ollama: enter base URL and select discovered model list (`http://ollama:11434` on same Docker network)
   - If no models are pulled yet, onboarding can continue without model selection.
   - Later in Telegram: `/ollama pull gpt-oss:20b` -> `/models` -> `/model <id|number>`
+- OpenRouter: enter API key + base URL (default `https://openrouter.ai/api/v1`), then scan/select free models dynamically
+  - Free model rule follows OpenClaw: model id ending with `:free` or zero prompt/completion pricing.
 
 This stores config in `~/.codexclaw/config.json` by default.
 Telegram access follows openclaw-style pairing by default (`dmPolicy: "pairing"`):
@@ -238,13 +240,14 @@ Runtime behavior:
 - `/usage`: show live usage limit windows (Codex provider only).
 - `/think`, `/thinking`, `/reasoning`: show or set reasoning effort (`none|minimal|low|medium|high|xhigh`).
 - `/provider`: show current provider/model and pending setup state.
-- `/provider <id|alias|number>`: switch provider; starts OAuth flow (Codex/Qwen) or endpoint setup prompt (Ollama).
+- `/provider <id|alias|number>`: switch provider; starts OAuth flow (Codex/Qwen), endpoint setup prompt (Ollama), or API-key setup + free-model scan (OpenRouter).
 - `/provider cancel`: cancel pending provider setup.
 - `/models`: list available models for the current provider.
 - `/model`: show current provider/model + current reasoning effort + usage summary. `/model <id|number>` switches model immediately.
 - `/ollama list|pull|rm`: list/pull/delete Ollama models in chat.
 - While Codex OAuth is pending, the next non-command message is treated as callback URL input.
 - While Ollama setup is pending, the next non-command message is treated as Ollama base URL input.
+- While OpenRouter setup is pending, the next non-command message is treated as OpenRouter API key input.
 - Invalid command or wrong arguments: bot replies with the correct usage and points to `/help`.
 - Terminal input `bye` or `exit`: stop `telegram run` immediately (`/bye`, `/exit` also work).
 - Telegram command menu (`/`) is synced automatically on startup.

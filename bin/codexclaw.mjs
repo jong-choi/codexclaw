@@ -8,7 +8,7 @@ function trim(value) {
 function printHelp() {
   process.stdout.write(
     [
-      "tele-codex - minimal Codex/Qwen/Ollama + Telegram bridge",
+      "tele-codex - minimal Codex/Qwen/Ollama/OpenRouter + Telegram bridge",
       "",
       "Usage:",
       "  tele-codex onboard [--config <path>]",
@@ -17,7 +17,7 @@ function printHelp() {
       "  tele-codex idle",
       "",
       "Notes:",
-      "  - onboard: provider setup (OAuth or Ollama endpoint) + model select + telegram setup + optional Notion/web/scheduler skill setup",
+      "  - onboard: provider setup (OAuth/Ollama/OpenRouter) + model select + telegram setup + optional Notion/web/scheduler skill setup",
       "  - telegram run: start long-polling bot",
       "  - idle: keep container process alive (for docker compose utility service)",
       "  - in Telegram: /help shows command usage, /new resets context, /context shows history size, /usage shows live limit windows (e.g. 5h/1w), /think manages reasoning effort, /models and /model manage model, /ollama manages Ollama models",
@@ -93,6 +93,24 @@ function redactConfig(config) {
           apiKey: maskSecret(entry.apiKey),
         };
       }
+    }
+  }
+  if (next?.codex?.providers && typeof next.codex.providers === "object") {
+    for (const [providerId, connection] of Object.entries(next.codex.providers)) {
+      if (!connection || typeof connection !== "object") {
+        continue;
+      }
+      const sanitized = { ...connection };
+      if (sanitized.apiKey) {
+        sanitized.apiKey = maskSecret(sanitized.apiKey);
+      }
+      if (sanitized.access) {
+        sanitized.access = maskSecret(sanitized.access);
+      }
+      if (sanitized.refresh) {
+        sanitized.refresh = maskSecret(sanitized.refresh);
+      }
+      next.codex.providers[providerId] = sanitized;
     }
   }
   if (next?.tools && typeof next.tools === "object") {
