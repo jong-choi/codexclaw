@@ -6,6 +6,8 @@ import {
 } from "@mariozechner/pi-ai";
 import {
   CODEX_PROVIDER_ID,
+  GROQ_API_ENV_NAME,
+  GROQ_PROVIDER_ID,
   OLLAMA_PROVIDER_ID,
   OPENROUTER_API_ENV_NAME,
   OPENROUTER_PROVIDER_ID,
@@ -398,7 +400,11 @@ export async function loginQwenOAuth(params) {
 
 export async function loginProviderOAuth(params) {
   const providerId = trim(params?.providerId) || CODEX_PROVIDER_ID;
-  if (providerId === OLLAMA_PROVIDER_ID || providerId === OPENROUTER_PROVIDER_ID) {
+  if (
+    providerId === OLLAMA_PROVIDER_ID
+    || providerId === OPENROUTER_PROVIDER_ID
+    || providerId === GROQ_PROVIDER_ID
+  ) {
     return null;
   }
   if (providerId === QWEN_PROVIDER_ID) {
@@ -517,6 +523,28 @@ export async function resolveFreshProviderAccessToken(providerId, oauthCredentia
     if (!resolvedApiKey) {
       throw new Error(
         "Missing OpenRouter API key. Configure provider connection first (/provider openrouter or codexclaw onboard).",
+      );
+    }
+
+    return {
+      accessToken: resolvedApiKey,
+      credentials: null,
+      changed: false,
+    };
+  }
+  if (resolvedProviderId === GROQ_PROVIDER_ID) {
+    const providerConnection =
+      options?.providerConnection && typeof options.providerConnection === "object"
+        ? options.providerConnection
+        : null;
+    const fromConnection = trim(providerConnection?.apiKey);
+    const fromEnv = trim(process.env[GROQ_API_ENV_NAME]);
+    const fromOAuth = trim(oauthCredentials?.access);
+    const resolvedApiKey = fromConnection || fromEnv || fromOAuth;
+
+    if (!resolvedApiKey) {
+      throw new Error(
+        "Missing Groq API key. Configure provider connection first (/provider groq or codexclaw onboard).",
       );
     }
 

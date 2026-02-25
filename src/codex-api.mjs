@@ -6,6 +6,8 @@ import {
   BRAVE_SEARCH_ENDPOINT,
   CODEX_API_BASE_URL,
   CODEX_PROVIDER_ID,
+  GROQ_API_BASE_URL,
+  GROQ_PROVIDER_ID,
   NOTION_API_BASE_URL,
   NOTION_API_ENV_NAME,
   NOTION_API_VERSION,
@@ -25,6 +27,7 @@ import {
   WEB_SEARCH_SKILL_KEY,
 } from "./constants.mjs";
 import { normalizeProviderModelId, resolveProviderId } from "./model-provider.mjs";
+import { normalizeGroqBaseUrl } from "./groq.mjs";
 import { normalizeOllamaBaseUrl } from "./ollama.mjs";
 import { normalizeOpenRouterBaseUrl } from "./openrouter.mjs";
 import {
@@ -504,6 +507,11 @@ function resolveOpenRouterBaseUrl(providerConnection) {
   return normalizeOpenRouterBaseUrl(configuredBaseUrl, OPENROUTER_API_BASE_URL);
 }
 
+function resolveGroqBaseUrl(providerConnection) {
+  const configuredBaseUrl = trim(providerConnection?.baseUrl) || GROQ_API_BASE_URL;
+  return normalizeGroqBaseUrl(configuredBaseUrl, GROQ_API_BASE_URL);
+}
+
 function buildFallbackModel(providerId, modelId, options = {}) {
   const resolvedProviderId = resolveProviderId(providerId);
   if (resolvedProviderId === OLLAMA_PROVIDER_ID) {
@@ -538,6 +546,28 @@ function buildFallbackModel(providerId, modelId, options = {}) {
       provider: OPENROUTER_PROVIDER_ID,
       baseUrl: resolveOpenRouterBaseUrl(options?.providerConnection),
       reasoning: false,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        supportsUsageInStreaming: false,
+        maxTokensField: "max_tokens",
+        supportsStrictMode: false,
+      },
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: DEFAULT_CONTEXT_WINDOW,
+      maxTokens: DEFAULT_MAX_TOKENS,
+    };
+  }
+  if (resolvedProviderId === GROQ_PROVIDER_ID) {
+    return {
+      id: modelId,
+      name: modelId,
+      api: "openai-completions",
+      provider: GROQ_PROVIDER_ID,
+      baseUrl: resolveGroqBaseUrl(options?.providerConnection),
+      reasoning: true,
       compat: {
         supportsStore: false,
         supportsDeveloperRole: false,
@@ -592,6 +622,12 @@ function resolveModel(providerId, modelId, options = {}) {
   const normalizedId = normalizeProviderModelId(resolvedProviderId, modelId);
   const registered = getModel(resolvedProviderId, normalizedId);
   if (registered) {
+    if (resolvedProviderId === GROQ_PROVIDER_ID) {
+      return {
+        ...registered,
+        baseUrl: resolveGroqBaseUrl(options?.providerConnection),
+      };
+    }
     return registered;
   }
   return buildFallbackModel(resolvedProviderId, normalizedId, options);

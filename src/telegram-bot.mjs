@@ -10,6 +10,7 @@ import {
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
   CODEX_PROVIDER_ID,
+  GROQ_PROVIDER_ID,
   OLLAMA_PROVIDER_ID,
   OPENROUTER_PROVIDER_ID,
   QWEN_PROVIDER_ID,
@@ -31,6 +32,13 @@ import {
   resolveProviderOAuth,
   resolveProviderShortLabel,
 } from "./model-provider.mjs";
+import {
+  buildGroqSetupHintLines,
+  listGroqModels,
+  normalizeGroqBaseUrl,
+  resolveGroqBaseUrlFromConfig,
+  validateGroqApiKey,
+} from "./groq.mjs";
 import {
   buildOllamaEndpointHintLines,
   deleteOllamaModel,
@@ -116,6 +124,7 @@ const PROVIDER_ALIAS_TO_ID = new Map([
   ["openai", CODEX_PROVIDER_ID],
   ["openai-codex", CODEX_PROVIDER_ID],
   ["openai_codex", CODEX_PROVIDER_ID],
+  ["groq", GROQ_PROVIDER_ID],
   ["qwen", QWEN_PROVIDER_ID],
   ["qwen-portal", QWEN_PROVIDER_ID],
   ["qwen_portal", QWEN_PROVIDER_ID],
@@ -680,6 +689,12 @@ async function resolveProviderModelIdsRuntime(providerId, config) {
     const baseUrl = resolveOllamaBaseUrlFromConfig(config);
     return await listOllamaModels({ baseUrl });
   }
+  if (resolvedProviderId === GROQ_PROVIDER_ID) {
+    const connection = resolveProviderConnection(config, GROQ_PROVIDER_ID);
+    const baseUrl = normalizeGroqBaseUrl(connection?.baseUrl);
+    const apiKey = trim(connection?.apiKey);
+    return await listGroqModels({ baseUrl, apiKey });
+  }
   if (resolvedProviderId === OPENROUTER_PROVIDER_ID) {
     const connection = resolveProviderConnection(config, OPENROUTER_PROVIDER_ID);
     const baseUrl = normalizeOpenRouterBaseUrl(connection?.baseUrl);
@@ -711,7 +726,11 @@ function resolveModelSelection(params) {
     const maybeProvider = trim(candidate.slice(0, slash));
     if (maybeProvider === providerId) {
       candidate = trim(candidate.slice(slash + 1));
-    } else if (providerId !== OLLAMA_PROVIDER_ID && providerId !== OPENROUTER_PROVIDER_ID) {
+    } else if (
+      providerId !== OLLAMA_PROVIDER_ID
+      && providerId !== OPENROUTER_PROVIDER_ID
+      && providerId !== GROQ_PROVIDER_ID
+    ) {
       candidate = candidate.slice(candidate.lastIndexOf("/") + 1);
     }
   }
@@ -810,6 +829,19 @@ function resolveOpenRouterStatusSuffix(config) {
   return "api key ready";
 }
 
+function resolveGroqStatusSuffix(config) {
+  const connection = resolveProviderConnection(config, GROQ_PROVIDER_ID);
+  const apiKey = trim(connection?.apiKey);
+  const baseUrl = trim(connection?.baseUrl);
+  if (!apiKey) {
+    return "api key required";
+  }
+  if (baseUrl) {
+    return `api key ready (${baseUrl})`;
+  }
+  return "api key ready";
+}
+
 function buildOllamaEndpointPrompt() {
   return [
     "Enter Ollama base URL as your next non-command message.",
@@ -823,6 +855,14 @@ function buildOpenRouterApiKeyPrompt() {
   return [
     "Send OpenRouter API key as your next non-command message.",
     ...buildOpenRouterSetupHintLines(),
+    "Use /provider cancel to abort.",
+  ].join("\n");
+}
+
+function buildGroqApiKeyPrompt() {
+  return [
+    "Send Groq API key as your next non-command message.",
+    ...buildGroqSetupHintLines(),
     "Use /provider cancel to abort.",
   ].join("\n");
 }
@@ -1075,6 +1115,9 @@ function buildProviderPendingMessage(pending) {
   if (pending.kind === "openrouter-api-key") {
     return "Send OpenRouter API key as your next non-command message, or run /provider cancel.";
   }
+  if (pending.kind === "groq-api-key") {
+    return "Send Groq API key as your next non-command message, or run /provider cancel.";
+  }
   return "Complete browser approval, or run /provider cancel.";
 }
 
@@ -1119,6 +1162,8 @@ function buildProviderCommandMessage(params) {
         : "oauth required"
       : provider.id === OLLAMA_PROVIDER_ID
         ? resolveOllamaStatusSuffix(params?.config)
+        : provider.id === GROQ_PROVIDER_ID
+          ? resolveGroqStatusSuffix(params?.config)
         : provider.id === OPENROUTER_PROVIDER_ID
           ? resolveOpenRouterStatusSuffix(params?.config)
           : "ready";
@@ -1129,26 +1174,30 @@ function buildProviderCommandMessage(params) {
   lines.push("/provider");
   lines.push("/provider <id|alias|number>");
   lines.push("/provider cancel");
-  lines.push("Aliases: codex, openai, qwen, ollama, openrouter");
+  lines.push("Aliases: codex, openai, qwen, ollama, openrouter, groq");
   return lines.join("\n");
 }
 
 function buildProviderUpdatedMessage(config, providerId, modelId, unchanged = false) {
   const connection =
-    providerId === OLLAMA_PROVIDER_ID || providerId === OPENROUTER_PROVIDER_ID
+    providerId === OLLAMA_PROVIDER_ID
+    || providerId === OPENROUTER_PROVIDER_ID
+    || providerId === GROQ_PROVIDER_ID
       ? resolveProviderConnection(config, providerId)
       : null;
   const endpointLine =
     providerId === OLLAMA_PROVIDER_ID && trim(connection?.baseUrl)
       ? `Ollama endpoint: ${trim(connection.baseUrl)}`
+      : providerId === GROQ_PROVIDER_ID && trim(connection?.baseUrl)
+        ? `Groq endpoint: ${trim(connection.baseUrl)}`
       : providerId === OPENROUTER_PROVIDER_ID && trim(connection?.baseUrl)
         ? `OpenRouter endpoint: ${trim(connection.baseUrl)}`
       : null;
   const apiKeyLine =
-    providerId === OPENROUTER_PROVIDER_ID
+    providerId === OPENROUTER_PROVIDER_ID || providerId === GROQ_PROVIDER_ID
       ? trim(connection?.apiKey)
-        ? "OpenRouter API key: configured"
-        : "OpenRouter API key: missing"
+        ? `${providerId === GROQ_PROVIDER_ID ? "Groq" : "OpenRouter"} API key: configured`
+        : `${providerId === GROQ_PROVIDER_ID ? "Groq" : "OpenRouter"} API key: missing`
       : null;
   return [
     unchanged ? "Provider unchanged." : "Provider updated.",
@@ -1203,6 +1252,8 @@ function buildHelpMessage(providerId) {
     providerModelIds[0]
       || (providerId === OLLAMA_PROVIDER_ID
         ? "gpt-oss:20b"
+        : providerId === GROQ_PROVIDER_ID
+          ? "llama-3.3-70b-versatile"
         : providerId === OPENROUTER_PROVIDER_ID
           ? "meta-llama/llama-3.3-70b-instruct:free"
           : "<id>");
@@ -1215,7 +1266,7 @@ function buildHelpMessage(providerId) {
     "/usage - Show live usage limits (Codex only).",
     "/think <level> - Set reasoning effort.",
     "/provider - Show provider status and pending setup state.",
-    "/provider <id|alias|number> - Switch provider (OAuth, Ollama endpoint, or OpenRouter API-key setup).",
+    "/provider <id|alias|number> - Switch provider (OAuth, Ollama endpoint, OpenRouter API-key setup, or Groq API-key setup).",
     "/provider cancel - Cancel pending provider setup request.",
     "/models - List available models for current provider.",
     `/model - Show current provider/model (${providerShortLabel}) + reasoning + usage summary.`,
@@ -1229,6 +1280,7 @@ function buildHelpMessage(providerId) {
     "/provider qwen",
     "/provider ollama",
     "/provider openrouter",
+    "/provider groq",
     "/provider 1",
     "/provider cancel",
     "/think medium",
@@ -1562,6 +1614,10 @@ export async function runTelegramBot(options = {}) {
       process.stdout.write(
         "No Ollama model selected yet. Use /ollama pull gpt-oss:20b and /model <id|number> in Telegram.\n",
       );
+    } else if (activeProviderId === GROQ_PROVIDER_ID) {
+      process.stdout.write(
+        "No Groq model selected yet. Use /provider groq, then /models and /model <id|number>.\n",
+      );
     } else if (activeProviderId === OPENROUTER_PROVIDER_ID) {
       process.stdout.write(
         "No OpenRouter model selected yet. Use /provider openrouter, then /models and /model <id|number>.\n",
@@ -1710,6 +1766,31 @@ export async function runTelegramBot(options = {}) {
         "OpenRouter provider setup started.",
         `Base URL: ${baseUrl}`,
         buildOpenRouterApiKeyPrompt(),
+      ].join("\n"),
+    );
+  };
+
+  const startGroqProviderSetup = async ({ providerId, chatId, senderId }) => {
+    const existingConnection = resolveProviderConnection(config, GROQ_PROVIDER_ID);
+    const baseUrl = normalizeGroqBaseUrl(existingConnection?.baseUrl || resolveGroqBaseUrlFromConfig(config));
+    const pending = {
+      kind: "groq-api-key",
+      providerId,
+      chatId,
+      senderId,
+      baseUrl,
+      canceled: false,
+    };
+    pendingProviderOAuth = pending;
+    process.stdout.write(`Started Groq provider setup for chat ${chatId} (sender ${senderId}).\n`);
+
+    await sendMessage(
+      botToken,
+      chatId,
+      [
+        "Groq provider setup started.",
+        `Base URL: ${baseUrl}`,
+        buildGroqApiKeyPrompt(),
       ].join("\n"),
     );
   };
@@ -2205,6 +2286,79 @@ export async function runTelegramBot(options = {}) {
                 `Failed to activate OpenRouter provider: ${trim(error?.message) || "unknown error"}`,
               );
             }
+          } else if (senderPendingProviderOAuth.kind === "groq-api-key") {
+            const apiKeyError = validateGroqApiKey(text);
+            if (apiKeyError) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Invalid Groq API key: ${apiKeyError}\n${buildGroqApiKeyPrompt()}`,
+              );
+              continue;
+            }
+
+            const apiKey = trim(text);
+            const baseUrl = normalizeGroqBaseUrl(senderPendingProviderOAuth.baseUrl);
+            let discoveredModels;
+            try {
+              discoveredModels = await listGroqModels({
+                apiKey,
+                baseUrl,
+              });
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                [
+                  `Failed to scan Groq models: ${trim(error?.message) || "unknown error"}`,
+                  "Send API key again or run /provider cancel.",
+                ].join("\n"),
+              );
+              continue;
+            }
+
+            assignProviderConnection(config, GROQ_PROVIDER_ID, {
+              apiKey,
+              baseUrl,
+            });
+
+            if (!Array.isArray(discoveredModels) || discoveredModels.length === 0) {
+              await sendMessage(
+                botToken,
+                chatId,
+                [
+                  `Connected to Groq (${baseUrl}) but no models were returned.`,
+                  "Try again later or switch provider.",
+                  "Use /provider cancel to abort.",
+                ].join("\n"),
+              );
+              continue;
+            }
+
+            try {
+              const switched = await applyProviderSwitch({
+                providerId: GROQ_PROVIDER_ID,
+                oauthCredentials: null,
+                modelIds: discoveredModels,
+              });
+              clearPendingProviderOAuth(senderPendingProviderOAuth);
+              await sendMessage(
+                botToken,
+                chatId,
+                buildProviderUpdatedMessage(
+                  config,
+                  switched.providerId,
+                  switched.modelId,
+                  switched.unchanged,
+                ),
+              );
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Failed to activate Groq provider: ${trim(error?.message) || "unknown error"}`,
+              );
+            }
           } else {
             await sendMessage(
               botToken,
@@ -2549,6 +2703,95 @@ export async function runTelegramBot(options = {}) {
             continue;
           }
 
+          if (selectedProviderId === GROQ_PROVIDER_ID) {
+            const existingConnection = resolveProviderConnection(config, GROQ_PROVIDER_ID);
+            const existingApiKey = trim(existingConnection?.apiKey);
+            if (!existingApiKey) {
+              try {
+                await startGroqProviderSetup({
+                  providerId: selectedProviderId,
+                  chatId,
+                  senderId,
+                });
+              } catch (error) {
+                clearPendingProviderOAuth();
+                await sendMessage(
+                  botToken,
+                  chatId,
+                  `Failed to start Groq setup: ${trim(error?.message) || "unknown error"}`,
+                );
+              }
+              continue;
+            }
+
+            let modelIds = [];
+            let scanError = "";
+            try {
+              modelIds = await listGroqModels({
+                apiKey: existingApiKey,
+                baseUrl: normalizeGroqBaseUrl(existingConnection?.baseUrl || resolveGroqBaseUrlFromConfig(config)),
+              });
+            } catch (error) {
+              scanError = trim(error?.message) || "unknown error";
+            }
+
+            if (!Array.isArray(modelIds) || modelIds.length === 0) {
+              try {
+                await startGroqProviderSetup({
+                  providerId: selectedProviderId,
+                  chatId,
+                  senderId,
+                });
+                if (scanError) {
+                  await sendMessage(
+                    botToken,
+                    chatId,
+                    `Groq model scan failed with saved key: ${scanError}\nSend a new API key to continue.`,
+                  );
+                } else {
+                  await sendMessage(
+                    botToken,
+                    chatId,
+                    "No Groq models found with the saved key. Send API key again to rescan.",
+                  );
+                }
+              } catch (error) {
+                clearPendingProviderOAuth();
+                await sendMessage(
+                  botToken,
+                  chatId,
+                  `Failed to restart Groq setup: ${trim(error?.message) || "unknown error"}`,
+                );
+              }
+              continue;
+            }
+
+            try {
+              const switched = await applyProviderSwitch({
+                providerId: selectedProviderId,
+                oauthCredentials: null,
+                modelIds,
+              });
+              await sendMessage(
+                botToken,
+                chatId,
+                buildProviderUpdatedMessage(
+                  config,
+                  switched.providerId,
+                  switched.modelId,
+                  switched.unchanged,
+                ),
+              );
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Groq switch failed: ${trim(error?.message) || "unknown error"}`,
+              );
+            }
+            continue;
+          }
+
           const selectedRequiresOAuth = providerRequiresOAuth(selectedProviderId);
           const existingOAuth = resolveProviderOAuth(config, selectedProviderId);
           if (selectedRequiresOAuth && existingOAuth && trim(existingOAuth.access)) {
@@ -2771,6 +3014,11 @@ export async function runTelegramBot(options = {}) {
                   "No Ollama model is selected yet.",
                   "Run /ollama pull gpt-oss:20b, then /models and /model <id|number>.",
                 ].join("\n")
+              : activeProviderId === GROQ_PROVIDER_ID
+                ? [
+                    "No Groq model is selected yet.",
+                    "Run /provider groq, then /models and /model <id|number>.",
+                  ].join("\n")
               : activeProviderId === OPENROUTER_PROVIDER_ID
                 ? [
                     "No OpenRouter model is selected yet.",

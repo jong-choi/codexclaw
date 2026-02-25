@@ -1,6 +1,8 @@
 import { loadConfig, saveConfig } from "./config-store.mjs";
 import {
   BRAVE_API_ENV_NAME,
+  GROQ_API_BASE_URL,
+  GROQ_PROVIDER_ID,
   NOTION_API_ENV_NAME,
   NOTION_SKILL_KEY,
   OLLAMA_API_BASE_URL,
@@ -30,6 +32,13 @@ import {
   resolveProviderShortLabel,
 } from "./model-provider.mjs";
 import { loginProviderOAuth } from "./oauth.mjs";
+import {
+  buildGroqSetupHintLines,
+  listGroqModels,
+  normalizeGroqBaseUrl,
+  validateGroqApiKey,
+  validateGroqBaseUrl,
+} from "./groq.mjs";
 import {
   buildOllamaEndpointHintLines,
   listOllamaModels,
@@ -162,6 +171,23 @@ function resolveConfiguredOpenRouterConnection(config) {
   }
 }
 
+function resolveConfiguredGroqConnection(config) {
+  const connection = resolveProviderConnection(config, GROQ_PROVIDER_ID);
+  const apiKey = trim(connection?.apiKey);
+  const rawBaseUrl = trim(connection?.baseUrl);
+  try {
+    return {
+      apiKey,
+      baseUrl: normalizeGroqBaseUrl(rawBaseUrl || GROQ_API_BASE_URL, GROQ_API_BASE_URL),
+    };
+  } catch {
+    return {
+      apiKey,
+      baseUrl: normalizeGroqBaseUrl(GROQ_API_BASE_URL, GROQ_API_BASE_URL),
+    };
+  }
+}
+
 export async function runOnboard(options = {}) {
   const loaded = await loadConfig(options.configPath);
   const existingRaw = loaded.config ?? {};
@@ -194,8 +220,8 @@ export async function runOnboard(options = {}) {
     prompter.note(
       [
         "This setup includes only 7 steps:",
-        "1) Choose provider (OpenAI Codex, Qwen, Ollama, or OpenRouter)",
-        "2) Provider auth/setup (OAuth, Ollama endpoint, or OpenRouter API key)",
+        "1) Choose provider (OpenAI Codex, Qwen, Ollama, OpenRouter, or Groq)",
+        "2) Provider auth/setup (OAuth, Ollama endpoint, OpenRouter API key, or Groq API key)",
         "3) Choose one model (or defer when no model is available yet)",
         "4) Configure Telegram bot",
         "5) Optional: configure Notion skill API key",
@@ -217,6 +243,8 @@ export async function runOnboard(options = {}) {
             ? "local/remote endpoint"
             : provider.id === OPENROUTER_PROVIDER_ID
               ? "api key + free models"
+              : provider.id === GROQ_PROVIDER_ID
+                ? "api key + model scan"
             : "ChatGPT OAuth login",
     }));
 
@@ -365,13 +393,79 @@ export async function runOnboard(options = {}) {
         }
       }
       assignProviderOAuth(next, selectedProviderId, null);
+    } else if (selectedProviderId === GROQ_PROVIDER_ID) {
+      const existingGroq = resolveConfiguredGroqConnection(next);
+      let suggestedApiKey = existingGroq.apiKey;
+      let suggestedBaseUrl = existingGroq.baseUrl;
+
+      while (true) {
+        prompter.note(
+          buildGroqSetupHintLines().join("\n"),
+          "Groq setup",
+        );
+        const apiKey = await prompter.text({
+          message: "Groq API key",
+          required: true,
+          initialValue: suggestedApiKey,
+          validate: validateGroqApiKey,
+        });
+        const rawBaseUrl = await prompter.text({
+          message: "Groq base URL",
+          required: true,
+          initialValue: suggestedBaseUrl,
+          validate: validateGroqBaseUrl,
+        });
+        const normalizedBaseUrl = normalizeGroqBaseUrl(rawBaseUrl, GROQ_API_BASE_URL);
+
+        try {
+          const discovered = await listGroqModels({
+            apiKey,
+            baseUrl: normalizedBaseUrl,
+          });
+          assignProviderConnection(next, selectedProviderId, {
+            apiKey: trim(apiKey),
+            baseUrl: normalizedBaseUrl,
+          });
+          modelIds = discovered;
+          if (discovered.length === 0) {
+            prompter.note(
+              [
+                "No Groq models were returned at this endpoint.",
+                "Continuing without model selection.",
+                "After Telegram starts, run:",
+                "- /provider groq",
+                "- /models",
+                "- /model <id|number>",
+              ].join("\n"),
+              "Groq models",
+            );
+          }
+          break;
+        } catch (error) {
+          const errorMessage = trim(error?.message) || String(error);
+          const retry = await prompter.confirm({
+            message: `Failed to scan Groq models (${errorMessage}). Retry setup input?`,
+            initialValue: true,
+          });
+          if (!retry) {
+            throw new Error(`Groq setup aborted: ${errorMessage}`);
+          }
+          suggestedApiKey = trim(apiKey);
+          suggestedBaseUrl = normalizedBaseUrl;
+        }
+      }
+      assignProviderOAuth(next, selectedProviderId, null);
     }
 
     const currentSelection = resolveConfiguredModelSelection(next);
     const currentModelId =
       currentSelection.providerId === selectedProviderId ? currentSelection.modelId : "";
     if (!Array.isArray(modelIds) || modelIds.length === 0) {
-      if (selectedProviderId === OLLAMA_PROVIDER_ID || selectedProviderId === OPENROUTER_PROVIDER_ID) {
+      if (
+        selectedProviderId === OLLAMA_PROVIDER_ID
+        || selectedProviderId === OPENROUTER_PROVIDER_ID
+        || selectedProviderId === GROQ_PROVIDER_ID
+      ) {
         const codex = next.codex && typeof next.codex === "object" ? { ...next.codex } : {};
         codex.provider = selectedProviderId;
         delete codex.model;
@@ -647,6 +741,10 @@ export async function runOnboard(options = {}) {
       savedSelection.providerId === OLLAMA_PROVIDER_ID
         ? resolveConfiguredOllamaBaseUrl(saved.config)
         : "";
+    const savedGroqBaseUrl =
+      savedSelection.providerId === GROQ_PROVIDER_ID
+        ? resolveConfiguredGroqConnection(saved.config).baseUrl
+        : "";
 
     prompter.outro(
       [
@@ -654,6 +752,7 @@ export async function runOnboard(options = {}) {
         `Provider: ${savedProviderLabel} (${savedSelection.providerId})`,
         `Model: ${savedSelection.ref || "(not set)"}`,
         savedOllamaBaseUrl ? `Ollama endpoint: ${savedOllamaBaseUrl}` : null,
+        savedGroqBaseUrl ? `Groq endpoint: ${savedGroqBaseUrl}` : null,
         "Telegram DM policy: pairing (default)",
         `Notion skill: ${notionEnabled ? "enabled" : "disabled"}`,
         notionEnabled
