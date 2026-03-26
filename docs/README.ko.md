@@ -9,7 +9,7 @@ OpenClaw는 MIT 라이선스([openclaw/openclaw](https://github.com/openclaw/ope
 
 최소한의 온보딩 + 런타임 구성:
 
-1. provider 선택(OpenAI Codex, Qwen, Ollama, OpenRouter, Groq)
+1. provider 선택(OpenAI Codex, OpenAI API(호환), Qwen, Ollama, OpenRouter, Groq)
 2. provider별 모델 선택
 3. Telegram 봇 브리지
 4. 선택: Notion 스킬 API 키 설정
@@ -170,6 +170,7 @@ npm run onboard
 
 Provider 설정 방식은 provider에 따라 다릅니다:
 - OpenAI Codex: 콜백 URL 수동 붙여넣기
+- OpenAI API(호환): base URL(기본값 `https://api.openai.com/v1`) + API 키 입력 후 `/models`로 모델 목록을 스캔/선택
 - Qwen: device-code 로그인(URL 열기 + 승인 + 자동 폴링)
 - Ollama: base URL 입력 후 감지된 모델 목록에서 선택 (`같은 Docker 네트워크면 http://ollama:11434`)
   - 아직 pull한 모델이 없어도 온보딩은 계속 진행할 수 있습니다.

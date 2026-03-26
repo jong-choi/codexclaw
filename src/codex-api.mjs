@@ -14,6 +14,8 @@ import {
   NOTION_SKILL_KEY,
   OLLAMA_API_BASE_URL,
   OLLAMA_PROVIDER_ID,
+  OPENAI_API_BASE_URL,
+  OPENAI_API_PROVIDER_ID,
   OPENROUTER_API_BASE_URL,
   OPENROUTER_PROVIDER_ID,
   QWEN_API_BASE_URL,
@@ -28,6 +30,7 @@ import {
 } from "./constants.mjs";
 import { normalizeProviderModelId, resolveProviderId } from "./model-provider.mjs";
 import { normalizeGroqBaseUrl } from "./groq.mjs";
+import { normalizeOpenAIBaseUrl } from "./openai-api.mjs";
 import { normalizeOllamaBaseUrl } from "./ollama.mjs";
 import { normalizeOpenRouterBaseUrl } from "./openrouter.mjs";
 import {
@@ -512,6 +515,11 @@ function resolveGroqBaseUrl(providerConnection) {
   return normalizeGroqBaseUrl(configuredBaseUrl, GROQ_API_BASE_URL);
 }
 
+function resolveOpenAIBaseUrl(providerConnection) {
+  const configuredBaseUrl = trim(providerConnection?.baseUrl) || OPENAI_API_BASE_URL;
+  return normalizeOpenAIBaseUrl(configuredBaseUrl, OPENAI_API_BASE_URL);
+}
+
 function buildFallbackModel(providerId, modelId, options = {}) {
   const resolvedProviderId = resolveProviderId(providerId);
   if (resolvedProviderId === OLLAMA_PROVIDER_ID) {
@@ -535,6 +543,28 @@ function buildFallbackModel(providerId, modelId, options = {}) {
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 32_768,
+      maxTokens: DEFAULT_MAX_TOKENS,
+    };
+  }
+  if (resolvedProviderId === OPENAI_API_PROVIDER_ID) {
+    return {
+      id: modelId,
+      name: modelId,
+      api: "openai-completions",
+      provider: OPENAI_API_PROVIDER_ID,
+      baseUrl: resolveOpenAIBaseUrl(options?.providerConnection),
+      reasoning: true,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        supportsUsageInStreaming: false,
+        maxTokensField: "max_tokens",
+        supportsStrictMode: false,
+      },
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: DEFAULT_CONTEXT_WINDOW,
       maxTokens: DEFAULT_MAX_TOKENS,
     };
   }
@@ -622,6 +652,12 @@ function resolveModel(providerId, modelId, options = {}) {
   const normalizedId = normalizeProviderModelId(resolvedProviderId, modelId);
   const registered = getModel(resolvedProviderId, normalizedId);
   if (registered) {
+    if (resolvedProviderId === OPENAI_API_PROVIDER_ID) {
+      return {
+        ...registered,
+        baseUrl: resolveOpenAIBaseUrl(options?.providerConnection),
+      };
+    }
     if (resolvedProviderId === GROQ_PROVIDER_ID) {
       return {
         ...registered,

@@ -9,6 +9,7 @@ import {
   GROQ_API_ENV_NAME,
   GROQ_PROVIDER_ID,
   OLLAMA_PROVIDER_ID,
+  OPENAI_API_PROVIDER_ID,
   OPENROUTER_API_ENV_NAME,
   OPENROUTER_PROVIDER_ID,
   QWEN_PROVIDER_ID,
@@ -507,6 +508,25 @@ export async function resolveFreshProviderAccessToken(providerId, oauthCredentia
       accessToken: "ollama-local",
       credentials:
         oauthCredentials && typeof oauthCredentials === "object" ? { ...oauthCredentials } : null,
+      changed: false,
+    };
+  }
+  if (resolvedProviderId === OPENAI_API_PROVIDER_ID) {
+    const providerConnection =
+      options?.providerConnection && typeof options.providerConnection === "object"
+        ? options.providerConnection
+        : null;
+    const fromConnection = trim(providerConnection?.apiKey);
+
+    if (!fromConnection) {
+      throw new Error(
+        "Missing OpenAI API key. Configure provider connection first (/provider openai-api or codexclaw onboard).",
+      );
+    }
+
+    return {
+      accessToken: fromConnection,
+      credentials: null,
       changed: false,
     };
   }

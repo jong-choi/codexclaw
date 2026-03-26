@@ -7,6 +7,8 @@ import {
   NOTION_SKILL_KEY,
   OLLAMA_API_BASE_URL,
   OLLAMA_PROVIDER_ID,
+  OPENAI_API_BASE_URL,
+  OPENAI_API_PROVIDER_ID,
   OPENROUTER_API_BASE_URL,
   OPENROUTER_PROVIDER_ID,
   QWEN_PROVIDER_ID,
@@ -39,6 +41,13 @@ import {
   validateGroqApiKey,
   validateGroqBaseUrl,
 } from "./groq.mjs";
+import {
+  buildOpenAISetupHintLines,
+  listOpenAIModels,
+  normalizeOpenAIBaseUrl,
+  validateOpenAIApiKey,
+  validateOpenAIBaseUrl,
+} from "./openai-api.mjs";
 import {
   buildOllamaEndpointHintLines,
   listOllamaModels,
@@ -188,6 +197,23 @@ function resolveConfiguredGroqConnection(config) {
   }
 }
 
+function resolveConfiguredOpenAIConnection(config) {
+  const connection = resolveProviderConnection(config, OPENAI_API_PROVIDER_ID);
+  const apiKey = trim(connection?.apiKey);
+  const rawBaseUrl = trim(connection?.baseUrl);
+  try {
+    return {
+      apiKey,
+      baseUrl: normalizeOpenAIBaseUrl(rawBaseUrl || OPENAI_API_BASE_URL, OPENAI_API_BASE_URL),
+    };
+  } catch {
+    return {
+      apiKey,
+      baseUrl: normalizeOpenAIBaseUrl(OPENAI_API_BASE_URL, OPENAI_API_BASE_URL),
+    };
+  }
+}
+
 export async function runOnboard(options = {}) {
   const loaded = await loadConfig(options.configPath);
   const existingRaw = loaded.config ?? {};
@@ -220,8 +246,8 @@ export async function runOnboard(options = {}) {
     prompter.note(
       [
         "This setup includes only 7 steps:",
-        "1) Choose provider (OpenAI Codex, Qwen, Ollama, OpenRouter, or Groq)",
-        "2) Provider auth/setup (OAuth, Ollama endpoint, OpenRouter API key, or Groq API key)",
+        "1) Choose provider (OpenAI Codex, OpenAI API, Qwen, Ollama, OpenRouter, or Groq)",
+        "2) Provider auth/setup (OAuth, Ollama endpoint, OpenAI/OpenRouter/Groq API key)",
         "3) Choose one model (or defer when no model is available yet)",
         "4) Configure Telegram bot",
         "5) Optional: configure Notion skill API key",
@@ -241,6 +267,8 @@ export async function runOnboard(options = {}) {
           ? "device-code login"
           : provider.id === OLLAMA_PROVIDER_ID
             ? "local/remote endpoint"
+            : provider.id === OPENAI_API_PROVIDER_ID
+              ? "api key + model scan"
             : provider.id === OPENROUTER_PROVIDER_ID
               ? "api key + free models"
               : provider.id === GROQ_PROVIDER_ID
@@ -327,6 +355,82 @@ export async function runOnboard(options = {}) {
           if (!retry) {
             throw new Error(`Ollama setup aborted: ${errorMessage}`);
           }
+          suggestedBaseUrl = normalizedBaseUrl;
+        }
+      }
+      assignProviderOAuth(next, selectedProviderId, null);
+    } else if (selectedProviderId === OPENAI_API_PROVIDER_ID) {
+      const existingOpenAI = resolveConfiguredOpenAIConnection(next);
+      let suggestedApiKey = existingOpenAI.apiKey;
+      let suggestedBaseUrl = existingOpenAI.baseUrl;
+
+      while (true) {
+        prompter.note(
+          buildOpenAISetupHintLines().join("\n"),
+          "OpenAI API setup",
+        );
+        const apiKey = await prompter.text({
+          message: "OpenAI API key",
+          required: true,
+          initialValue: suggestedApiKey,
+          validate: validateOpenAIApiKey,
+        });
+        const rawBaseUrl = await prompter.text({
+          message: "OpenAI-compatible base URL",
+          required: true,
+          initialValue: suggestedBaseUrl,
+          validate: validateOpenAIBaseUrl,
+        });
+        const normalizedBaseUrl = normalizeOpenAIBaseUrl(rawBaseUrl, OPENAI_API_BASE_URL);
+
+        const defaultHost = new URL(OPENAI_API_BASE_URL).hostname;
+        const selectedHost = new URL(normalizedBaseUrl).hostname;
+        if (selectedHost !== defaultHost) {
+          const proceed = await prompter.confirm({
+            message: `Base URL host is ${selectedHost} (default ${defaultHost}). Your API key will be sent to this endpoint. Continue?`,
+            initialValue: false,
+          });
+          if (!proceed) {
+            suggestedApiKey = trim(apiKey);
+            suggestedBaseUrl = normalizedBaseUrl;
+            continue;
+          }
+        }
+
+        try {
+          const discovered = await listOpenAIModels({
+            apiKey,
+            baseUrl: normalizedBaseUrl,
+          });
+          assignProviderConnection(next, selectedProviderId, {
+            apiKey: trim(apiKey),
+            baseUrl: normalizedBaseUrl,
+          });
+          modelIds = discovered;
+          if (discovered.length === 0) {
+            prompter.note(
+              [
+                "No models were returned at this endpoint.",
+                "Continuing without model selection.",
+                "After Telegram starts, run:",
+                "- /provider openai-api",
+                "- /models",
+                "- /model <id|number>",
+              ].join("\n"),
+              "OpenAI API models",
+            );
+          }
+          break;
+        } catch (error) {
+          const errorMessage = trim(error?.message) || String(error);
+          const retry = await prompter.confirm({
+            message: `Failed to scan models (${errorMessage}). Retry setup input?`,
+            initialValue: true,
+          });
+          if (!retry) {
+            throw new Error(`OpenAI API setup aborted: ${errorMessage}`);
+          }
+          suggestedApiKey = trim(apiKey);
           suggestedBaseUrl = normalizedBaseUrl;
         }
       }
@@ -463,6 +567,7 @@ export async function runOnboard(options = {}) {
     if (!Array.isArray(modelIds) || modelIds.length === 0) {
       if (
         selectedProviderId === OLLAMA_PROVIDER_ID
+        || selectedProviderId === OPENAI_API_PROVIDER_ID
         || selectedProviderId === OPENROUTER_PROVIDER_ID
         || selectedProviderId === GROQ_PROVIDER_ID
       ) {

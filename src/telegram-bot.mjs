@@ -12,6 +12,8 @@ import {
   CODEX_PROVIDER_ID,
   GROQ_PROVIDER_ID,
   OLLAMA_PROVIDER_ID,
+  OPENAI_API_BASE_URL,
+  OPENAI_API_PROVIDER_ID,
   OPENROUTER_PROVIDER_ID,
   QWEN_PROVIDER_ID,
   TELEGRAM_API_BASE_URL,
@@ -39,6 +41,12 @@ import {
   resolveGroqBaseUrlFromConfig,
   validateGroqApiKey,
 } from "./groq.mjs";
+import {
+  buildOpenAISetupHintLines,
+  listOpenAIModels,
+  normalizeOpenAIBaseUrl,
+  validateOpenAIApiKey,
+} from "./openai-api.mjs";
 import {
   buildOllamaEndpointHintLines,
   deleteOllamaModel,
@@ -124,6 +132,9 @@ const PROVIDER_ALIAS_TO_ID = new Map([
   ["openai", CODEX_PROVIDER_ID],
   ["openai-codex", CODEX_PROVIDER_ID],
   ["openai_codex", CODEX_PROVIDER_ID],
+  ["openai-api", OPENAI_API_PROVIDER_ID],
+  ["openai_api", OPENAI_API_PROVIDER_ID],
+  ["openai-compatible", OPENAI_API_PROVIDER_ID],
   ["groq", GROQ_PROVIDER_ID],
   ["qwen", QWEN_PROVIDER_ID],
   ["qwen-portal", QWEN_PROVIDER_ID],
@@ -689,6 +700,12 @@ async function resolveProviderModelIdsRuntime(providerId, config) {
     const baseUrl = resolveOllamaBaseUrlFromConfig(config);
     return await listOllamaModels({ baseUrl });
   }
+  if (resolvedProviderId === OPENAI_API_PROVIDER_ID) {
+    const connection = resolveProviderConnection(config, OPENAI_API_PROVIDER_ID);
+    const baseUrl = normalizeOpenAIBaseUrl(connection?.baseUrl || OPENAI_API_BASE_URL);
+    const apiKey = trim(connection?.apiKey);
+    return await listOpenAIModels({ baseUrl, apiKey });
+  }
   if (resolvedProviderId === GROQ_PROVIDER_ID) {
     const connection = resolveProviderConnection(config, GROQ_PROVIDER_ID);
     const baseUrl = normalizeGroqBaseUrl(connection?.baseUrl);
@@ -730,6 +747,7 @@ function resolveModelSelection(params) {
       providerId !== OLLAMA_PROVIDER_ID
       && providerId !== OPENROUTER_PROVIDER_ID
       && providerId !== GROQ_PROVIDER_ID
+      && providerId !== OPENAI_API_PROVIDER_ID
     ) {
       candidate = candidate.slice(candidate.lastIndexOf("/") + 1);
     }
@@ -829,6 +847,19 @@ function resolveOpenRouterStatusSuffix(config) {
   return "api key ready";
 }
 
+function resolveOpenAIStatusSuffix(config) {
+  const connection = resolveProviderConnection(config, OPENAI_API_PROVIDER_ID);
+  const apiKey = trim(connection?.apiKey);
+  const baseUrl = trim(connection?.baseUrl);
+  if (!apiKey) {
+    return "api key required";
+  }
+  if (baseUrl) {
+    return `api key ready (${baseUrl})`;
+  }
+  return "api key ready";
+}
+
 function resolveGroqStatusSuffix(config) {
   const connection = resolveProviderConnection(config, GROQ_PROVIDER_ID);
   const apiKey = trim(connection?.apiKey);
@@ -855,6 +886,23 @@ function buildOpenRouterApiKeyPrompt() {
   return [
     "Send OpenRouter API key as your next non-command message.",
     ...buildOpenRouterSetupHintLines(),
+    "Use /provider cancel to abort.",
+  ].join("\n");
+}
+
+function buildOpenAIBaseUrlPrompt() {
+  return [
+    "Send OpenAI-compatible base URL as your next non-command message.",
+    ...buildOpenAISetupHintLines(),
+    "Examples: https://api.openai.com/v1, https://your-proxy.example.com/v1",
+    "Use /provider cancel to abort.",
+  ].join("\n");
+}
+
+function buildOpenAIApiKeyPrompt() {
+  return [
+    "Send OpenAI API key as your next non-command message.",
+    "Warning: sending secrets in Telegram can leave chat history. Prefer onboarding when possible.",
     "Use /provider cancel to abort.",
   ].join("\n");
 }
@@ -1112,6 +1160,12 @@ function buildProviderPendingMessage(pending) {
   if (pending.kind === "ollama-base-url") {
     return "Send Ollama base URL as your next non-command message, or run /provider cancel.";
   }
+  if (pending.kind === "openai-api-base-url") {
+    return "Send OpenAI-compatible base URL as your next non-command message, or run /provider cancel.";
+  }
+  if (pending.kind === "openai-api-key") {
+    return "Send OpenAI API key as your next non-command message, or run /provider cancel.";
+  }
   if (pending.kind === "openrouter-api-key") {
     return "Send OpenRouter API key as your next non-command message, or run /provider cancel.";
   }
@@ -1162,6 +1216,8 @@ function buildProviderCommandMessage(params) {
         : "oauth required"
       : provider.id === OLLAMA_PROVIDER_ID
         ? resolveOllamaStatusSuffix(params?.config)
+        : provider.id === OPENAI_API_PROVIDER_ID
+          ? resolveOpenAIStatusSuffix(params?.config)
         : provider.id === GROQ_PROVIDER_ID
           ? resolveGroqStatusSuffix(params?.config)
         : provider.id === OPENROUTER_PROVIDER_ID
@@ -1174,13 +1230,14 @@ function buildProviderCommandMessage(params) {
   lines.push("/provider");
   lines.push("/provider <id|alias|number>");
   lines.push("/provider cancel");
-  lines.push("Aliases: codex, openai, qwen, ollama, openrouter, groq");
+  lines.push("Aliases: codex, openai, openai-api, openai-compatible, qwen, ollama, openrouter, groq");
   return lines.join("\n");
 }
 
 function buildProviderUpdatedMessage(config, providerId, modelId, unchanged = false) {
   const connection =
     providerId === OLLAMA_PROVIDER_ID
+    || providerId === OPENAI_API_PROVIDER_ID
     || providerId === OPENROUTER_PROVIDER_ID
     || providerId === GROQ_PROVIDER_ID
       ? resolveProviderConnection(config, providerId)
@@ -1188,16 +1245,30 @@ function buildProviderUpdatedMessage(config, providerId, modelId, unchanged = fa
   const endpointLine =
     providerId === OLLAMA_PROVIDER_ID && trim(connection?.baseUrl)
       ? `Ollama endpoint: ${trim(connection.baseUrl)}`
+      : providerId === OPENAI_API_PROVIDER_ID && trim(connection?.baseUrl)
+        ? `OpenAI endpoint: ${trim(connection.baseUrl)}`
       : providerId === GROQ_PROVIDER_ID && trim(connection?.baseUrl)
         ? `Groq endpoint: ${trim(connection.baseUrl)}`
       : providerId === OPENROUTER_PROVIDER_ID && trim(connection?.baseUrl)
         ? `OpenRouter endpoint: ${trim(connection.baseUrl)}`
       : null;
   const apiKeyLine =
-    providerId === OPENROUTER_PROVIDER_ID || providerId === GROQ_PROVIDER_ID
+    providerId === OPENAI_API_PROVIDER_ID || providerId === OPENROUTER_PROVIDER_ID || providerId === GROQ_PROVIDER_ID
       ? trim(connection?.apiKey)
-        ? `${providerId === GROQ_PROVIDER_ID ? "Groq" : "OpenRouter"} API key: configured`
-        : `${providerId === GROQ_PROVIDER_ID ? "Groq" : "OpenRouter"} API key: missing`
+        ? `${
+            providerId === GROQ_PROVIDER_ID
+              ? "Groq"
+              : providerId === OPENROUTER_PROVIDER_ID
+                ? "OpenRouter"
+                : "OpenAI"
+          } API key: configured`
+        : `${
+            providerId === GROQ_PROVIDER_ID
+              ? "Groq"
+              : providerId === OPENROUTER_PROVIDER_ID
+                ? "OpenRouter"
+                : "OpenAI"
+          } API key: missing`
       : null;
   return [
     unchanged ? "Provider unchanged." : "Provider updated.",
@@ -1266,7 +1337,7 @@ function buildHelpMessage(providerId) {
     "/usage - Show live usage limits (Codex only).",
     "/think <level> - Set reasoning effort.",
     "/provider - Show provider status and pending setup state.",
-    "/provider <id|alias|number> - Switch provider (OAuth, Ollama endpoint, OpenRouter API-key setup, or Groq API-key setup).",
+    "/provider <id|alias|number> - Switch provider (OAuth, Ollama endpoint, OpenAI API setup, OpenRouter API-key setup, or Groq API-key setup).",
     "/provider cancel - Cancel pending provider setup request.",
     "/models - List available models for current provider.",
     `/model - Show current provider/model (${providerShortLabel}) + reasoning + usage summary.`,
@@ -1279,6 +1350,7 @@ function buildHelpMessage(providerId) {
     "Examples:",
     "/provider qwen",
     "/provider ollama",
+    "/provider openai-api",
     "/provider openrouter",
     "/provider groq",
     "/provider 1",
@@ -1622,6 +1694,10 @@ export async function runTelegramBot(options = {}) {
       process.stdout.write(
         "No OpenRouter model selected yet. Use /provider openrouter, then /models and /model <id|number>.\n",
       );
+    } else if (activeProviderId === OPENAI_API_PROVIDER_ID) {
+      process.stdout.write(
+        "No OpenAI API model selected yet. Use /provider openai-api, then /models and /model <id|number>.\n",
+      );
     } else {
       throw new Error("model selection is missing. Run `codexclaw onboard`.");
     }
@@ -1741,6 +1817,32 @@ export async function runTelegramBot(options = {}) {
         "Ollama provider setup started.",
         `Current endpoint: ${pending.suggestedBaseUrl}`,
         buildOllamaEndpointPrompt(),
+      ].join("\n"),
+    );
+  };
+
+  const startOpenAIProviderSetup = async ({ providerId, chatId, senderId }) => {
+    const existingConnection = resolveProviderConnection(config, OPENAI_API_PROVIDER_ID);
+    const suggestedBaseUrl = normalizeOpenAIBaseUrl(existingConnection?.baseUrl || OPENAI_API_BASE_URL);
+    const pending = {
+      kind: "openai-api-base-url",
+      providerId,
+      chatId,
+      senderId,
+      suggestedBaseUrl,
+      confirmBaseUrl: "",
+      canceled: false,
+    };
+    pendingProviderOAuth = pending;
+    process.stdout.write(`Started OpenAI API provider setup for chat ${chatId} (sender ${senderId}).\n`);
+
+    await sendMessage(
+      botToken,
+      chatId,
+      [
+        "OpenAI API provider setup started.",
+        `Current endpoint: ${pending.suggestedBaseUrl}`,
+        buildOpenAIBaseUrlPrompt(),
       ].join("\n"),
     );
   };
@@ -2213,6 +2315,133 @@ export async function runTelegramBot(options = {}) {
                 `Failed to activate Ollama provider: ${trim(error?.message) || "unknown error"}`,
               );
             }
+          } else if (senderPendingProviderOAuth.kind === "openai-api-base-url") {
+            let normalizedBaseUrl;
+            try {
+              normalizedBaseUrl = normalizeOpenAIBaseUrl(text, OPENAI_API_BASE_URL);
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Invalid OpenAI-compatible base URL: ${trim(error?.message) || "unknown error"}\n${buildOpenAIBaseUrlPrompt()}`,
+              );
+              continue;
+            }
+
+            const defaultHost = new URL(OPENAI_API_BASE_URL).hostname;
+            const selectedHost = new URL(normalizedBaseUrl).hostname;
+            if (selectedHost !== defaultHost) {
+              const pendingConfirm = trim(senderPendingProviderOAuth.confirmBaseUrl);
+              if (pendingConfirm && pendingConfirm === normalizedBaseUrl) {
+                senderPendingProviderOAuth.confirmBaseUrl = "";
+              } else {
+                senderPendingProviderOAuth.confirmBaseUrl = normalizedBaseUrl;
+                await sendMessage(
+                  botToken,
+                  chatId,
+                  [
+                    `Warning: base URL host is ${selectedHost} (default is ${defaultHost}).`,
+                    "Your API key will be sent to this endpoint.",
+                    "To confirm, send the exact same base URL again.",
+                    "Or run /provider cancel.",
+                  ].join("\n"),
+                );
+                continue;
+              }
+            }
+
+            const pending = {
+              kind: "openai-api-key",
+              providerId: OPENAI_API_PROVIDER_ID,
+              chatId,
+              senderId,
+              baseUrl: normalizedBaseUrl,
+              canceled: false,
+            };
+            pendingProviderOAuth = pending;
+
+            await sendMessage(
+              botToken,
+              chatId,
+              [
+                "OpenAI API endpoint saved.",
+                `Base URL: ${normalizedBaseUrl}`,
+                buildOpenAIApiKeyPrompt(),
+              ].join("\n"),
+            );
+          } else if (senderPendingProviderOAuth.kind === "openai-api-key") {
+            const apiKeyError = validateOpenAIApiKey(text);
+            if (apiKeyError) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Invalid OpenAI API key: ${apiKeyError}\n${buildOpenAIApiKeyPrompt()}`,
+              );
+              continue;
+            }
+
+            const apiKey = trim(text);
+            const baseUrl = normalizeOpenAIBaseUrl(senderPendingProviderOAuth.baseUrl || OPENAI_API_BASE_URL);
+            let discoveredModels;
+            try {
+              discoveredModels = await listOpenAIModels({
+                apiKey,
+                baseUrl,
+              });
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                [
+                  `Failed to scan OpenAI models: ${trim(error?.message) || "unknown error"}`,
+                  "Send API key again or run /provider cancel.",
+                ].join("\n"),
+              );
+              continue;
+            }
+
+            assignProviderConnection(config, OPENAI_API_PROVIDER_ID, {
+              apiKey,
+              baseUrl,
+            });
+
+            if (!Array.isArray(discoveredModels) || discoveredModels.length === 0) {
+              await sendMessage(
+                botToken,
+                chatId,
+                [
+                  `Connected to OpenAI-compatible endpoint (${baseUrl}) but no models were returned.`,
+                  "Try again later or switch provider.",
+                  "Use /provider cancel to abort.",
+                ].join("\n"),
+              );
+              continue;
+            }
+
+            try {
+              const switched = await applyProviderSwitch({
+                providerId: OPENAI_API_PROVIDER_ID,
+                oauthCredentials: null,
+                modelIds: discoveredModels,
+              });
+              clearPendingProviderOAuth(senderPendingProviderOAuth);
+              await sendMessage(
+                botToken,
+                chatId,
+                buildProviderUpdatedMessage(
+                  config,
+                  switched.providerId,
+                  switched.modelId,
+                  switched.unchanged,
+                ),
+              );
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `Failed to activate OpenAI API provider: ${trim(error?.message) || "unknown error"}`,
+              );
+            }
           } else if (senderPendingProviderOAuth.kind === "openrouter-api-key") {
             const apiKeyError = validateOpenRouterApiKey(text);
             if (apiKeyError) {
@@ -2609,6 +2838,95 @@ export async function runTelegramBot(options = {}) {
                 botToken,
                 chatId,
                 `Failed to start Ollama setup: ${trim(error?.message) || "unknown error"}`,
+              );
+            }
+            continue;
+          }
+
+          if (selectedProviderId === OPENAI_API_PROVIDER_ID) {
+            const existingConnection = resolveProviderConnection(config, OPENAI_API_PROVIDER_ID);
+            const existingApiKey = trim(existingConnection?.apiKey);
+            if (!existingApiKey) {
+              try {
+                await startOpenAIProviderSetup({
+                  providerId: selectedProviderId,
+                  chatId,
+                  senderId,
+                });
+              } catch (error) {
+                clearPendingProviderOAuth();
+                await sendMessage(
+                  botToken,
+                  chatId,
+                  `Failed to start OpenAI API setup: ${trim(error?.message) || "unknown error"}`,
+                );
+              }
+              continue;
+            }
+
+            let modelIds = [];
+            let scanError = "";
+            try {
+              modelIds = await listOpenAIModels({
+                apiKey: existingApiKey,
+                baseUrl: normalizeOpenAIBaseUrl(existingConnection?.baseUrl || OPENAI_API_BASE_URL),
+              });
+            } catch (error) {
+              scanError = trim(error?.message) || "unknown error";
+            }
+
+            if (!Array.isArray(modelIds) || modelIds.length === 0) {
+              try {
+                await startOpenAIProviderSetup({
+                  providerId: selectedProviderId,
+                  chatId,
+                  senderId,
+                });
+                if (scanError) {
+                  await sendMessage(
+                    botToken,
+                    chatId,
+                    `OpenAI model scan failed with saved key: ${scanError}\nSend base URL again to continue.`,
+                  );
+                } else {
+                  await sendMessage(
+                    botToken,
+                    chatId,
+                    "No models found with the saved key. Send base URL again to rescan.",
+                  );
+                }
+              } catch (error) {
+                clearPendingProviderOAuth();
+                await sendMessage(
+                  botToken,
+                  chatId,
+                  `Failed to restart OpenAI API setup: ${trim(error?.message) || "unknown error"}`,
+                );
+              }
+              continue;
+            }
+
+            try {
+              const switched = await applyProviderSwitch({
+                providerId: selectedProviderId,
+                oauthCredentials: null,
+                modelIds,
+              });
+              await sendMessage(
+                botToken,
+                chatId,
+                buildProviderUpdatedMessage(
+                  config,
+                  switched.providerId,
+                  switched.modelId,
+                  switched.unchanged,
+                ),
+              );
+            } catch (error) {
+              await sendMessage(
+                botToken,
+                chatId,
+                `OpenAI API switch failed: ${trim(error?.message) || "unknown error"}`,
               );
             }
             continue;
@@ -3023,6 +3341,11 @@ export async function runTelegramBot(options = {}) {
                 ? [
                     "No OpenRouter model is selected yet.",
                     "Run /provider openrouter, then /models and /model <id|number>.",
+                  ].join("\n")
+              : activeProviderId === OPENAI_API_PROVIDER_ID
+                ? [
+                    "No OpenAI API model is selected yet.",
+                    "Run /provider openai-api, then /models and /model <id|number>.",
                   ].join("\n")
               : [
                   `No model is selected for ${resolveProviderShortLabel(activeProviderId)}.`,

@@ -11,7 +11,7 @@ OpenClaw is released under the MIT License ([openclaw/openclaw](https://github.c
 
 Minimal onboarding + runtime for:
 
-1. Provider selection (OpenAI Codex, Qwen, Ollama, OpenRouter, or Groq)
+1. Provider selection (OpenAI Codex, OpenAI API (compatible), Qwen, Ollama, OpenRouter, or Groq)
 2. Provider model selection
 3. Telegram bot bridge
 4. Optional Notion skill API key setup
@@ -94,7 +94,7 @@ cd deploy/ollama
 docker compose down
 ```
 
-Run onboarding (interactive provider setup: OAuth for Codex/Qwen, endpoint input for Ollama, API key + free-model scan for OpenRouter, API key + model scan for Groq):
+Run onboarding (interactive provider setup: OAuth for Codex/Qwen, endpoint input for Ollama, base URL + API key + model scan for OpenAI API, API key + free-model scan for OpenRouter, API key + model scan for Groq):
 
 ```bash
 # run from repo root
@@ -172,6 +172,7 @@ npm run onboard
 
 Provider setup depends on provider:
 - OpenAI Codex: manual callback URL paste
+- OpenAI API (compatible): enter base URL (default `https://api.openai.com/v1`) + API key, then scan/select models dynamically from `/models`
 - Qwen: device-code login (open URL + approve + polling)
 - Ollama: enter base URL and select discovered model list (`http://ollama:11434` on same Docker network)
   - If no models are pulled yet, onboarding can continue without model selection.

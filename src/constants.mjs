@@ -3,6 +3,7 @@ export const QWEN_PROVIDER_ID = "qwen-portal";
 export const OLLAMA_PROVIDER_ID = "ollama";
 export const OPENROUTER_PROVIDER_ID = "openrouter";
 export const GROQ_PROVIDER_ID = "groq";
+export const OPENAI_API_PROVIDER_ID = "openai-api";
 
 export const CODEX_MODEL_IDS = [
   "gpt-5.1",
@@ -25,6 +26,7 @@ export const OPENROUTER_API_BASE_URL = "https://openrouter.ai/api/v1";
 export const OPENROUTER_API_ENV_NAME = "OPENROUTER_API_KEY";
 export const GROQ_API_BASE_URL = "https://api.groq.com/openai/v1";
 export const GROQ_API_ENV_NAME = "GROQ_API_KEY";
+export const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 export const QWEN_MODEL_IDS = ["coder-model", "vision-model"];
 
 export const TELEGRAM_API_BASE_URL = "https://api.telegram.org";
