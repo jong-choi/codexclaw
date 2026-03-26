@@ -130,6 +130,14 @@ export function normalizeProviderModelId(providerId, modelId) {
     return "";
   }
 
+  if (resolvedProviderId === OPENAI_API_PROVIDER_ID) {
+    const withoutPrefix = raw.startsWith(`${OPENAI_API_PROVIDER_ID}/`)
+      ? trim(raw.slice(OPENAI_API_PROVIDER_ID.length + 1))
+      : raw;
+    const aliases = spec.modelAliases;
+    return aliases[withoutPrefix] ?? withoutPrefix;
+  }
+
   let candidate = raw;
   const slash = candidate.indexOf("/");
   if (slash >= 0) {
